@@ -88,8 +88,8 @@ torch = base.torch
 # The wrapped script lives in scripts/make_dataset but calculates its asset
 # directory relative to ``scripts``.  Resolve from this launcher's repository
 # root and also replace the paths already captured by the base scene config.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ASSET_DIR = REPO_ROOT / "assets" / "openarm_use"
+LEROBOT_SRC_ROOT = Path(__file__).resolve().parents[1]
+ASSET_DIR = LEROBOT_SRC_ROOT / "assets" / "openarm_use"
 base.ASSET_DIR = ASSET_DIR
 base.TABLE_USD = str(ASSET_DIR / "table.usd")
 base.ROBOT_USD = str(ASSET_DIR / "openarm_half_tesollo_tactile.usd")
