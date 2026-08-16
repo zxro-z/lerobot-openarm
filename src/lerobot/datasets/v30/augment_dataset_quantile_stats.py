@@ -195,6 +195,7 @@ def augment_dataset_with_quantile_stats(
     dataset = LeRobotDataset(
         repo_id=repo_id,
         root=root,
+        video_backend="pyav", # add
     )
 
     if not overwrite and has_quantile_stats(dataset.meta.stats):
@@ -213,13 +214,13 @@ def augment_dataset_with_quantile_stats(
     logging.info("Successfully updated dataset with quantile statistics")
     dataset.push_to_hub()
 
-    hub_api = HfApi()
-    try:
-        hub_api.delete_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
-    except HTTPError as e:
-        logging.info(f"tag={CODEBASE_VERSION} probably doesn't exist. Skipping exception ({e})")
-        pass
-    hub_api.create_tag(repo_id, tag=CODEBASE_VERSION, revision=None, repo_type="dataset")
+    # hub_api = HfApi()
+    # try:
+    #     hub_api.delete_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
+    # except HTTPError as e:
+    #     logging.info(f"tag={CODEBASE_VERSION} probably doesn't exist. Skipping exception ({e})")
+    #     pass
+    # hub_api.create_tag(repo_id, tag=CODEBASE_VERSION, revision=None, repo_type="dataset")
 
 
 def main():

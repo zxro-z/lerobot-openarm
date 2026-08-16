@@ -169,6 +169,9 @@ def rollout(
         # TODO: works with SyncVectorEnv but not AsyncVectorEnv
         observation = add_envs_task(env, observation)
 
+        if "task" not in observation:
+            observation["task"] = ["Pick up the red cube and place it in the storage box."] * env.num_envs
+
         # Apply environment-specific preprocessing (e.g., LiberoProcessorStep for LIBERO)
         observation = env_preprocessor(observation)
 

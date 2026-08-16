@@ -20,7 +20,7 @@ import gymnasium as gym
 from gymnasium.envs.registration import registry as gym_registry
 
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.envs.configs import AlohaEnv, EnvConfig, HubEnvConfig, IsaaclabArenaEnv, LiberoEnv, PushtEnv
+from lerobot.envs.configs import AlohaEnv, EnvConfig, HubEnvConfig, IsaaclabArenaEnv, LiberoEnv, OpenArmEnv, PushtEnv
 from lerobot.envs.utils import _call_make_env, _download_hub_file, _import_hub_module, _normalize_hub_result
 from lerobot.policies.xvla.configuration_xvla import XVLAConfig
 from lerobot.processor import ProcessorStep
@@ -35,6 +35,12 @@ def make_env_config(env_type: str, **kwargs) -> EnvConfig:
         return PushtEnv(**kwargs)
     elif env_type == "libero":
         return LiberoEnv(**kwargs)
+    elif env_type == "gv_sim":
+        # EnvConfig를 그대로 상속받거나, 파서가 기본 EnvConfig를 통과시키도록 처리합니다.
+        # 가장 간단한 방법은 범용 EnvConfig를 반환하는 것입니다.
+        return EnvConfig(type="gv_sim", **kwargs)
+    elif env_type == "openarm":
+        return OpenArmEnv(**kwargs)
     else:
         raise ValueError(f"Policy type '{env_type}' is not available.")
 
@@ -193,6 +199,17 @@ def make_env(
             gym_kwargs=cfg.gym_kwargs,
             env_cls=env_cls,
         )
+    elif "gv_sim" in cfg.type:
+        from lerobot.envs.gv_wrapper import GVLeRobotWrapper
+
+        if cfg.task is None:
+            raise ValueError("GV_SIM requires a task to be specified")
+
+        def _make_one_gv():
+            return GVLeRobotWrapper(task_name=cfg.task, num_arms=getattr(cfg, "num_arms", 2))
+
+        vec = env_cls([_make_one_gv for _ in range(n_envs)], autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
+        return {cfg.type: {0: vec}}
 
     if cfg.gym_id not in gym_registry:
         print(f"gym id '{cfg.gym_id}' not found, attempting to import '{cfg.package_name}'...")
@@ -213,6 +230,11 @@ def make_env(
         return gym.make(cfg.gym_id, disable_env_checker=cfg.disable_env_checker, **(cfg.gym_kwargs or {}))
 
     vec = env_cls([_make_one for _ in range(n_envs)], autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
+
+    # [추가] 벡터 환경 래퍼에 task 및 task_description 속성 직접 부여
+    if hasattr(cfg, "task") and cfg.task is not None:
+        vec.task = cfg.task
+        vec.task_description = cfg.task
 
     # normalize to {suite: {task_id: vec_env}} for consistency
     suite_name = cfg.type  # e.g., "pusht", "aloha"

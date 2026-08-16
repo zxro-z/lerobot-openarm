@@ -18,6 +18,8 @@ from typing import Any
 
 import draccus
 
+from typing import Literal
+
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.robots import RobotConfig
 from lerobot.teleoperators.config import TeleoperatorConfig
@@ -173,6 +175,38 @@ class PushtEnv(EnvConfig):
             "max_episode_steps": self.episode_length,
         }
 
+@EnvConfig.register_subclass("gv_sim")
+@dataclass
+class GvSimEnv(EnvConfig):
+    task: str | None = None
+    num_arms: int = 2
+    fps: int = 50
+    episode_length: int = 300
+    state_dim: int = 14
+    action_dim: int = 14
+    camera_names: list[str] = field(default_factory=lambda: ["cam_high", "cam_left_wrist", "cam_right_wrist"])
+    
+    features: dict[str, PolicyFeature] = field(default_factory=dict)
+    features_map: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # 1. Action 및 State (Proprioception) 공간 정의
+        self.features[ACTION] = PolicyFeature(type=FeatureType.ACTION, shape=(self.action_dim,))
+        self.features_map[ACTION] = ACTION
+        
+        self.features["agent_pos"] = PolicyFeature(type=FeatureType.STATE, shape=(self.state_dim,))
+        self.features_map["agent_pos"] = OBS_STATE
+        
+        # 2. Camera 공간 정의
+        for cam_name in self.camera_names:
+            # 해상도는 AV-ALOHA 논문의 480x640을 기준으로 함
+            self.features[cam_name] = PolicyFeature(type=FeatureType.VISUAL, shape=(480, 640, 3))
+            self.features_map[cam_name] = f"{OBS_IMAGES}.{cam_name}"
+
+    @property
+    def gym_kwargs(self) -> dict:
+        # factory.py에서 수동으로 wrapper를 연결하므로 여기서는 빈 딕셔너리 반환
+        return {}
 
 @dataclass
 class ImagePreprocessingConfig:
@@ -454,3 +488,63 @@ class IsaaclabArenaEnv(HubEnvConfig):
     @property
     def gym_kwargs(self) -> dict:
         return {}
+
+# ==========================================
+# 1) OpenArmEnv 클래스를 찾아 아래와 같이 교체/수정합니다.
+# ==========================================
+@EnvConfig.register_subclass("openarm")
+@dataclass
+class OpenArmEnv(EnvConfig):
+    task: str | None = "OpenArmPickPlace-v0"
+    fps: int = 30
+    episode_length: int = 400
+    obs_type: str = "pixels_agent_pos"
+    observation_height: int = 480
+    observation_width: int = 640
+    render_mode: str = "rgb_array"
+    gripper_override_mode: str = "normal"
+    
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(8,)),
+        }
+    )
+    # [수정] 데이터셋의 듀얼 카메라 키를 Gym 환경의 관측 키와 100% 1:1 매핑합니다.
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            ACTION: ACTION,
+            "observation.state": "observation.state",
+            "observation.images.top": "observation.images.top",
+            "observation.images.wrist": "observation.images.wrist",  # [추가] 손목 카메라 매핑
+        }
+    )
+
+    def __post_init__(self):
+        if self.obs_type == "pixels":
+            self.features["observation.images.top"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+            # [추가] pixels 모드에서도 wrist 카메라를 인식하도록 추가
+            self.features["observation.images.wrist"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+        elif self.obs_type == "pixels_agent_pos":
+            self.features["observation.state"] = PolicyFeature(
+                type=FeatureType.STATE, shape=(8,)
+            )
+            self.features["observation.images.top"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+            # [추가] pixels_agent_pos 모드의 Visual Feature에 wrist 카메라 등록
+            self.features["observation.images.wrist"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {
+            "obs_type": self.obs_type,
+            "render_mode": self.render_mode,
+            "max_episode_steps": self.episode_length,
+            "gripper_override_mode": self.gripper_override_mode,
+        }

@@ -107,6 +107,27 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
     if "camera_obs" in observations:
         return_observations[f"{OBS_STR}.camera_obs"] = observations["camera_obs"]
 
+    # [추가] OpenArm 및 표준 LeRobot observation.* 키 명시적 지원
+    for key, val in observations.items():
+        if key.startswith("observation.images.") and key not in return_observations:
+            img_tensor = val if isinstance(val, torch.Tensor) else torch.from_numpy(val)
+            if img_tensor.ndim == 3:
+                img_tensor = img_tensor.unsqueeze(0)
+            # 채널이 마지막(H, W, C)인 경우 채널 우선(C, H, W)으로 변경
+            if img_tensor.shape[-1] in [1, 3, 4] and img_tensor.shape[1] not in [1, 3, 4]:
+                img_tensor = einops.rearrange(img_tensor, "b h w c -> b c h w").contiguous()
+            img_tensor = img_tensor.type(torch.float32)
+            if img_tensor.max() > 1.0:
+                img_tensor /= 255.0
+            return_observations[key] = img_tensor
+
+        elif (key.startswith("observation.state") or key == "observation.state") and key not in return_observations:
+            state_tensor = val if isinstance(val, torch.Tensor) else torch.from_numpy(val)
+            state_tensor = state_tensor.float()
+            if state_tensor.dim() == 1:
+                state_tensor = state_tensor.unsqueeze(0)
+            return_observations[key] = state_tensor
+
     return return_observations
 
 
@@ -152,36 +173,42 @@ def check_env_attributes_and_types(env: gym.vector.VectorEnv) -> None:
                 stacklevel=2,
             )
 
-
 def add_envs_task(env: gym.vector.VectorEnv, observation: RobotObservation) -> RobotObservation:
     """Adds task feature to the observation dict with respect to the first environment attribute."""
-    if hasattr(env.envs[0], "task_description"):
-        task_result = env.call("task_description")
+    # [방어 코드] 전처리 단계에서 데이터가 소실되어 빈 딕셔너리가 들어오는 경우 명확한 에러 출력
+    if not observation or len(observation.keys()) == 0:
+        raise ValueError(
+            "[FATAL] preprocess_observation의 반환값이 비어 있습니다! "
+            "환경이 출력하는 관측 키가 preprocess_observation 내에서 제대로 처리되고 있는지 확인하세요."
+        )
 
-        if isinstance(task_result, tuple):
-            task_result = list(task_result)
-
-        if not isinstance(task_result, list):
-            raise TypeError(f"Expected task_description to return a list, got {type(task_result)}")
-        if not all(isinstance(item, str) for item in task_result):
-            raise TypeError("All items in task_description result must be strings")
-
-        observation["task"] = task_result
+    # 1. 래퍼(vec)에 직접 주입된 task 속성이 있다면 최우선 사용
+    if hasattr(env, "task") and getattr(env, "task") is not None:
+        val = getattr(env, "task")
+        num_envs = observation[list(observation.keys())[0]].shape[0]
+        observation["task"] = [val if isinstance(val, str) else str(val)] * num_envs
+    
+    # 2. sub-env의 task_description 확인 (속성/메서드 모두 안전하게 처리)
+    elif hasattr(env.envs[0], "task_description"):
+        try:
+            task_result = env.call("task_description")
+        except Exception:
+            task_result = [getattr(e, "task_description", "") for e in env.envs]
+        observation["task"] = list(task_result) if isinstance(task_result, (tuple, list)) else [str(task_result)] * len(env.envs)
+    
+    # 3. sub-env의 task 확인 (속성/메서드 모두 안전하게 처리)
     elif hasattr(env.envs[0], "task"):
-        task_result = env.call("task")
-
-        if isinstance(task_result, tuple):
-            task_result = list(task_result)
-
-        if not isinstance(task_result, list):
-            raise TypeError(f"Expected task to return a list, got {type(task_result)}")
-        if not all(isinstance(item, str) for item in task_result):
-            raise TypeError("All items in task result must be strings")
-
-        observation["task"] = task_result
-    else:  #  For envs without language instructions, e.g. aloha transfer cube and etc.
+        try:
+            task_result = env.call("task")
+        except Exception:
+            task_result = [getattr(e, "task", "") for e in env.envs]
+        observation["task"] = list(task_result) if isinstance(task_result, (tuple, list)) else [str(task_result)] * len(env.envs)
+    
+    # 4. 언어 지시어가 없는 환경의 경우 공백 프롬프트 처리
+    else:
         num_envs = observation[list(observation.keys())[0]].shape[0]
         observation["task"] = ["" for _ in range(num_envs)]
+        
     return observation
 
 

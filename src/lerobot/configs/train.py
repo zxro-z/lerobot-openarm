@@ -74,6 +74,12 @@ class TrainPipelineConfig(HubMixin):
     rabc_epsilon: float = 1e-6  # Small constant for numerical stability
     rabc_head_mode: str | None = "sparse"  # For dual-head models: "sparse" or "dense"
 
+    # Manifest-backed grasp-positive oversampling
+    grasp_positive_manifest: Path | None = None
+    grasp_positive_weight: float = 1.0
+    target_commitment_manifest: Path | None = None
+    target_commitment_weight: float = 1.0
+
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
     checkpoint_path: Path | None = field(init=False, default=None)
@@ -84,6 +90,18 @@ class TrainPipelineConfig(HubMixin):
         if policy_path:
             # Only load the policy config
             cli_overrides = parser.get_cli_overrides("policy")
+            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
+            self.policy.pretrained_path = Path(policy_path)
+        elif self.policy is not None and self.policy.type == "smolvla":
+            # Align the default SmolVLA training path with the reference wrapper:
+            # initialize from the published base checkpoint, while forcing feature
+            # inference from dataset metadata instead of reusing saved feature specs.
+            policy_path = "lerobot/smolvla_base"
+            cli_overrides = list(parser.get_cli_overrides("policy") or [])
+            if not any(arg.startswith("--input_features=") for arg in cli_overrides):
+                cli_overrides.append("--input_features=null")
+            if not any(arg.startswith("--output_features=") for arg in cli_overrides):
+                cli_overrides.append("--output_features=null")
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = Path(policy_path)
         elif self.resume:
@@ -147,6 +165,26 @@ class TrainPipelineConfig(HubMixin):
                 self.rabc_progress_path = str(Path(self.dataset.root) / "sarm_progress.parquet")
             else:
                 self.rabc_progress_path = f"hf://datasets/{repo_id}/sarm_progress.parquet"
+
+        if self.grasp_positive_manifest is not None:
+            self.grasp_positive_manifest = Path(self.grasp_positive_manifest).expanduser().resolve()
+            if not self.grasp_positive_manifest.is_file():
+                raise FileNotFoundError(f"Grasp manifest not found: {self.grasp_positive_manifest}")
+            if self.grasp_positive_weight < 1.0:
+                raise ValueError(
+                    f"grasp_positive_weight must be >= 1.0 when grasp_positive_manifest is set, got {self.grasp_positive_weight}"
+                )
+        if self.target_commitment_manifest is not None:
+            self.target_commitment_manifest = Path(self.target_commitment_manifest).expanduser().resolve()
+            if not self.target_commitment_manifest.is_file():
+                raise FileNotFoundError(
+                    f"Target-commitment manifest not found: {self.target_commitment_manifest}"
+                )
+            if self.target_commitment_weight < 1.0:
+                raise ValueError(
+                    "target_commitment_weight must be >= 1.0 when target_commitment_manifest is set, "
+                    f"got {self.target_commitment_weight}"
+                )
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:

@@ -1,0 +1,20 @@
+{
+  "left_root": "/home/zxro/arena/lerobot/outputs/lerobot_datasets/random_cube_tilt_30_gripper_mapped_box_blue_50_degree",
+  "right_root": "/home/zxro/arena/lerobot/outputs/lerobot_datasets/random_cube_tilt_30_gripper_mapped_box_blue_50_degree",
+  "info_json_identical": true,
+  "stats_json_identical": true,
+  "tasks_identical": true,
+  "episodes_identical": true,
+  "data_parquet_checks": {
+    "schema_identical": true,
+    "action_values_identical": true,
+    "state_values_identical": true,
+    "timestamps_identical": true
+  },
+  "file_manifest_checks": {
+    "same_relpaths": true,
+    "same_sizes": true,
+    "same_sha256": true
+  },
+  "HUB_ROUNDTRIP_DATASET_MATCH": "PASS"
+}

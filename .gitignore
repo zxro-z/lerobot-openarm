@@ -177,3 +177,10 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Local / generated artifacts
+models/
+reference_success/
+gym_openarm/
+src/lerobot/datasets/openarm_three_color_transit_tilt_50/
+*.zip

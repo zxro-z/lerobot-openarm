@@ -29,7 +29,11 @@ from tqdm import tqdm
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
-from lerobot.datasets.sampler import EpisodeAwareSampler
+from lerobot.datasets.sampler import (
+    build_combined_oversampling_sampler,
+    EpisodeAwareSampler,
+    build_grasp_oversampling_sampler,
+)
 from lerobot.datasets.utils import cycle
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
@@ -223,6 +227,38 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if not is_main_process:
         dataset = make_dataset(cfg)
 
+    if is_main_process and cfg.policy.pretrained_path is not None:
+        try:
+            pretrained_cfg = cfg.policy.__class__.from_pretrained(str(cfg.policy.pretrained_path))
+            logging.info("[PRETRAINED POLICY] %s", cfg.policy.pretrained_path)
+            logging.info("[PRETRAINED POLICY FEATURES]\n%s", pformat(
+                {
+                    "input_features": {
+                        key: {"type": str(ft.type), "shape": ft.shape}
+                        for key, ft in (pretrained_cfg.input_features or {}).items()
+                    },
+                    "output_features": {
+                        key: {"type": str(ft.type), "shape": ft.shape}
+                        for key, ft in (pretrained_cfg.output_features or {}).items()
+                    },
+                }
+            ))
+            if hasattr(pretrained_cfg, "load_vlm_weights"):
+                logging.info("[PRETRAINED VLM WEIGHTS LOADED] %s", pretrained_cfg.load_vlm_weights)
+        except Exception as exc:
+            logging.warning("Failed to inspect pretrained policy config: %s", exc)
+
+    if is_main_process:
+        logging.info("[DATASET FEATURES]\n%s", pformat(dataset.meta.info["features"]))
+        logging.info("[TRAINING CONTRACT]")
+        logging.info("base = %s", cfg.policy.pretrained_path)
+        logging.info("dataset = %s", cfg.dataset.repo_id)
+        logging.info("train_expert_only = %s", getattr(cfg.policy, "train_expert_only", None))
+        logging.info("freeze_vision_encoder = %s", getattr(cfg.policy, "freeze_vision_encoder", None))
+        logging.info("load_vlm_weights = %s", getattr(cfg.policy, "load_vlm_weights", None))
+        logging.info("train_state_proj = %s", getattr(cfg.policy, "train_state_proj", None))
+        logging.info("attention_mode = %s", getattr(cfg.policy, "attention_mode", None))
+
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
@@ -238,6 +274,28 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         ds_meta=dataset.meta,
         rename_map=cfg.rename_map,
     )
+
+    if is_main_process:
+        logging.info(
+            "[FINAL POLICY INPUT FEATURES]\n%s",
+            pformat(
+                {
+                    key: {"type": str(ft.type), "shape": ft.shape}
+                    for key, ft in (policy.config.input_features or {}).items()
+                }
+            ),
+        )
+        logging.info(
+            "[FINAL POLICY OUTPUT FEATURES]\n%s",
+            pformat(
+                {
+                    key: {"type": str(ft.type), "shape": ft.shape}
+                    for key, ft in (policy.config.output_features or {}).items()
+                }
+            ),
+        )
+        if hasattr(policy.config, "load_vlm_weights"):
+            logging.info("[VLM WEIGHTS LOADED] %s", policy.config.load_vlm_weights)
 
     if cfg.peft is not None:
         logging.info("Using PEFT! Wrapping model.")
@@ -339,18 +397,126 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
+    episode_indices_to_use = dataset.episodes if getattr(dataset, "episodes", None) is not None else None
+    drop_n_first_frames = 0
+    drop_n_last_frames = getattr(cfg.policy, "drop_n_last_frames", 0) if hasattr(cfg.policy, "drop_n_last_frames") else 0
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
             dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=dataset.episodes,
-            drop_n_last_frames=cfg.policy.drop_n_last_frames,
+            episode_indices_to_use=episode_indices_to_use,
+            drop_n_first_frames=drop_n_first_frames,
+            drop_n_last_frames=drop_n_last_frames,
             shuffle=True,
         )
     else:
         shuffle = True
         sampler = None
+
+    grasp_summary = None
+    target_commitment_summary = None
+    if cfg.grasp_positive_manifest is not None or cfg.target_commitment_manifest is not None:
+        if cfg.target_commitment_manifest is not None:
+            sampler, combined_summary = build_combined_oversampling_sampler(
+                dataset=dataset,
+                grasp_manifest_path=cfg.grasp_positive_manifest,
+                grasp_positive_weight=cfg.grasp_positive_weight,
+                target_commitment_manifest_path=cfg.target_commitment_manifest,
+                target_commitment_weight=cfg.target_commitment_weight,
+                seed=cfg.seed,
+                episode_indices_to_use=episode_indices_to_use,
+                drop_n_first_frames=drop_n_first_frames,
+                drop_n_last_frames=drop_n_last_frames,
+            )
+            grasp_summary = combined_summary.grasp
+            target_commitment_summary = combined_summary.target_commitment
+        else:
+            sampler, grasp_summary = build_grasp_oversampling_sampler(
+                dataset=dataset,
+                manifest_path=cfg.grasp_positive_manifest,
+                positive_weight=cfg.grasp_positive_weight,
+                seed=cfg.seed,
+                episode_indices_to_use=episode_indices_to_use,
+                drop_n_first_frames=drop_n_first_frames,
+                drop_n_last_frames=drop_n_last_frames,
+            )
+            combined_summary = None
+        shuffle = False
+        if is_main_process:
+            logging.info("[GRASP OVERSAMPLING]")
+            logging.info("enabled = %s", grasp_summary is not None)
+            if grasp_summary is not None:
+                logging.info("manifest = %s", grasp_summary.manifest_path)
+                logging.info("weight = %.1f", grasp_summary.positive_weight)
+                logging.info("sampler = %s", grasp_summary.sampler_type)
+                logging.info("replacement = %s", grasp_summary.replacement)
+                logging.info("positive episodes = %s", grasp_summary.positive_episode_count)
+                logging.info("uncertain episodes = %s", grasp_summary.uncertain_episode_count)
+                logging.info("uncertain episode indices = %s", grasp_summary.uncertain_episode_indices)
+                logging.info("manifest rows = %s", grasp_summary.manifest_row_count)
+                logging.info("valid bonus rows = %s", grasp_summary.valid_row_count)
+                logging.info("excluded bonus rows = %s", grasp_summary.excluded_row_count)
+                logging.info("dataset samples = %s", grasp_summary.dataset_num_frames)
+                logging.info("eligible samples = %s", grasp_summary.eligible_num_frames)
+                logging.info("positive anchor samples = %s", grasp_summary.positive_num_frames)
+                logging.info("raw positive share = %.4f%%", 100 * grasp_summary.raw_positive_share)
+                logging.info("expected effective positive share = %.4f%%", 100 * grasp_summary.expected_sample_share)
+                logging.info("color positive rows = %s", grasp_summary.positive_rows_by_color)
+                logging.info("color positive frames = %s", grasp_summary.positive_frames_by_color)
+                logging.info(
+                    "expected sampling share by color = %s",
+                    {k: round(v * 100, 4) for k, v in grasp_summary.expected_sample_share_by_color.items()},
+                )
+                if grasp_summary.distinct_chunk_count_by_episode:
+                    chunk_counts = list(grasp_summary.distinct_chunk_count_by_episode.values())
+                    logging.info(
+                        "distinct positive chunk count per positive episode: min=%s max=%s mean=%.2f",
+                        min(chunk_counts),
+                        max(chunk_counts),
+                        sum(chunk_counts) / len(chunk_counts),
+                    )
+            logging.info("[TARGET COMMITMENT OVERSAMPLING]")
+            logging.info("enabled = %s", target_commitment_summary is not None)
+            if target_commitment_summary is not None:
+                logging.info("manifest = %s", target_commitment_summary.manifest_path)
+                logging.info("weight = %.1f", target_commitment_summary.positive_weight)
+                logging.info("positive episodes = %s", target_commitment_summary.positive_episode_count)
+                logging.info("uncertain episodes = %s", target_commitment_summary.uncertain_episode_count)
+                logging.info("uncertain episode indices = %s", target_commitment_summary.uncertain_episode_indices)
+                logging.info("manifest rows = %s", target_commitment_summary.manifest_row_count)
+                logging.info("valid bonus rows = %s", target_commitment_summary.valid_row_count)
+                logging.info("excluded bonus rows = %s", target_commitment_summary.excluded_row_count)
+                logging.info("positive anchor samples = %s", target_commitment_summary.positive_num_frames)
+                logging.info("raw positive share = %.4f%%", 100 * target_commitment_summary.raw_positive_share)
+                logging.info(
+                    "expected effective positive share = %.4f%%",
+                    100 * target_commitment_summary.expected_sample_share,
+                )
+                logging.info("color positive rows = %s", target_commitment_summary.positive_rows_by_color)
+                logging.info("color positive frames = %s", target_commitment_summary.positive_frames_by_color)
+            if combined_summary is not None:
+                logging.info("[COMBINED SAMPLING]")
+                logging.info("union positive samples = %s", combined_summary.union_positive_num_frames)
+                logging.info("raw union positive share = %.4f%%", 100 * combined_summary.raw_union_positive_share)
+                logging.info(
+                    "expected union positive share = %.4f%%",
+                    100 * combined_summary.expected_union_positive_share,
+                )
+                logging.info("expected grasp share = %.4f%%", 100 * combined_summary.expected_grasp_share)
+                logging.info(
+                    "expected commitment share = %.4f%%",
+                    100 * combined_summary.expected_commitment_share,
+                )
+                logging.info(
+                    "expected sampling share by color = %s",
+                    {k: round(v * 100, 4) for k, v in combined_summary.expected_sampling_share_by_color.items()},
+                )
+    elif is_main_process:
+        logging.info("[GRASP OVERSAMPLING]")
+        logging.info("enabled = false")
+        logging.info("[TARGET COMMITMENT OVERSAMPLING]")
+        logging.info("enabled = false")
 
     dataloader = torch.utils.data.DataLoader(
         dataset,

@@ -1,0 +1,1471 @@
+{
+  "dataset_root": "/home/zxro/arena/lerobot/outputs/lerobot_datasets/random_cube_tilt_30_gripper_mapped_box_blue_50_degree",
+  "codebase_version": "v3.0",
+  "robot_type": "openarm_isaaclab",
+  "fps": 30,
+  "total_episodes": 50,
+  "total_frames": 25378,
+  "total_tasks": 1,
+  "splits": {
+    "train": "0:50"
+  },
+  "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+  "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+  "feature_keys": [
+    "action",
+    "episode_index",
+    "frame_index",
+    "index",
+    "observation.images.top",
+    "observation.images.wrist",
+    "observation.state",
+    "task_index",
+    "timestamp"
+  ],
+  "camera_keys": [
+    "observation.images.top",
+    "observation.images.wrist"
+  ],
+  "state_shape": [
+    8
+  ],
+  "action_shape": [
+    8
+  ],
+  "feature_schema": {
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ],
+      "names": [
+        [
+          "joint_1",
+          "joint_2",
+          "joint_3",
+          "joint_4",
+          "joint_5",
+          "joint_6",
+          "joint_7",
+          "gripper"
+        ]
+      ]
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ],
+      "names": [
+        [
+          "joint_1",
+          "joint_2",
+          "joint_3",
+          "joint_4",
+          "joint_5",
+          "joint_6",
+          "joint_7",
+          "gripper"
+        ]
+      ]
+    },
+    "observation.images.top": {
+      "dtype": "video",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ],
+      "info": {
+        "video.height": 480,
+        "video.width": 640,
+        "video.codec": "av1",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": false
+      }
+    },
+    "observation.images.wrist": {
+      "dtype": "video",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ],
+      "info": {
+        "video.height": 480,
+        "video.width": 640,
+        "video.codec": "av1",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": false
+      }
+    },
+    "timestamp": {
+      "dtype": "float32",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "frame_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "episode_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "task_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    }
+  },
+  "task_metadata": {
+    "columns": [
+      "task_index"
+    ],
+    "num_rows": 1,
+    "index_name": "task",
+    "rows": [
+      {
+        "task": "Pick up the red cube and place it in the storage box.",
+        "task_index": 0
+      }
+    ]
+  },
+  "episode_lengths": {
+    "count": 50,
+    "min": 507,
+    "max": 508,
+    "mean": 507.56,
+    "std": 0.501426536422407,
+    "median": 508.0,
+    "value_counts": {
+      "507": 22,
+      "508": 28
+    },
+    "per_episode": [
+      {
+        "episode_index": 0,
+        "length": 508,
+        "dataset_from_index": 0,
+        "dataset_to_index": 508,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 1,
+        "length": 508,
+        "dataset_from_index": 508,
+        "dataset_to_index": 1016,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 2,
+        "length": 508,
+        "dataset_from_index": 1016,
+        "dataset_to_index": 1524,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 3,
+        "length": 507,
+        "dataset_from_index": 1524,
+        "dataset_to_index": 2031,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 4,
+        "length": 508,
+        "dataset_from_index": 2031,
+        "dataset_to_index": 2539,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 5,
+        "length": 507,
+        "dataset_from_index": 2539,
+        "dataset_to_index": 3046,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 6,
+        "length": 507,
+        "dataset_from_index": 3046,
+        "dataset_to_index": 3553,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 7,
+        "length": 508,
+        "dataset_from_index": 3553,
+        "dataset_to_index": 4061,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 8,
+        "length": 508,
+        "dataset_from_index": 4061,
+        "dataset_to_index": 4569,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 9,
+        "length": 508,
+        "dataset_from_index": 4569,
+        "dataset_to_index": 5077,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 10,
+        "length": 508,
+        "dataset_from_index": 5077,
+        "dataset_to_index": 5585,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 11,
+        "length": 507,
+        "dataset_from_index": 5585,
+        "dataset_to_index": 6092,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 12,
+        "length": 508,
+        "dataset_from_index": 6092,
+        "dataset_to_index": 6600,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 13,
+        "length": 507,
+        "dataset_from_index": 6600,
+        "dataset_to_index": 7107,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 14,
+        "length": 507,
+        "dataset_from_index": 7107,
+        "dataset_to_index": 7614,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 15,
+        "length": 507,
+        "dataset_from_index": 7614,
+        "dataset_to_index": 8121,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 16,
+        "length": 507,
+        "dataset_from_index": 8121,
+        "dataset_to_index": 8628,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 17,
+        "length": 508,
+        "dataset_from_index": 8628,
+        "dataset_to_index": 9136,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 18,
+        "length": 508,
+        "dataset_from_index": 9136,
+        "dataset_to_index": 9644,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 19,
+        "length": 507,
+        "dataset_from_index": 9644,
+        "dataset_to_index": 10151,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 20,
+        "length": 508,
+        "dataset_from_index": 10151,
+        "dataset_to_index": 10659,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 21,
+        "length": 508,
+        "dataset_from_index": 10659,
+        "dataset_to_index": 11167,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 22,
+        "length": 508,
+        "dataset_from_index": 11167,
+        "dataset_to_index": 11675,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 23,
+        "length": 507,
+        "dataset_from_index": 11675,
+        "dataset_to_index": 12182,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 24,
+        "length": 508,
+        "dataset_from_index": 12182,
+        "dataset_to_index": 12690,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 25,
+        "length": 508,
+        "dataset_from_index": 12690,
+        "dataset_to_index": 13198,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 26,
+        "length": 508,
+        "dataset_from_index": 13198,
+        "dataset_to_index": 13706,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 27,
+        "length": 508,
+        "dataset_from_index": 13706,
+        "dataset_to_index": 14214,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 28,
+        "length": 507,
+        "dataset_from_index": 14214,
+        "dataset_to_index": 14721,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 29,
+        "length": 508,
+        "dataset_from_index": 14721,
+        "dataset_to_index": 15229,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 30,
+        "length": 507,
+        "dataset_from_index": 15229,
+        "dataset_to_index": 15736,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 31,
+        "length": 508,
+        "dataset_from_index": 15736,
+        "dataset_to_index": 16244,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 32,
+        "length": 508,
+        "dataset_from_index": 16244,
+        "dataset_to_index": 16752,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 33,
+        "length": 508,
+        "dataset_from_index": 16752,
+        "dataset_to_index": 17260,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 34,
+        "length": 508,
+        "dataset_from_index": 17260,
+        "dataset_to_index": 17768,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 35,
+        "length": 507,
+        "dataset_from_index": 17768,
+        "dataset_to_index": 18275,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 36,
+        "length": 507,
+        "dataset_from_index": 18275,
+        "dataset_to_index": 18782,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 37,
+        "length": 507,
+        "dataset_from_index": 18782,
+        "dataset_to_index": 19289,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 38,
+        "length": 508,
+        "dataset_from_index": 19289,
+        "dataset_to_index": 19797,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 39,
+        "length": 507,
+        "dataset_from_index": 19797,
+        "dataset_to_index": 20304,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 40,
+        "length": 508,
+        "dataset_from_index": 20304,
+        "dataset_to_index": 20812,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 41,
+        "length": 507,
+        "dataset_from_index": 20812,
+        "dataset_to_index": 21319,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 42,
+        "length": 507,
+        "dataset_from_index": 21319,
+        "dataset_to_index": 21826,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 43,
+        "length": 507,
+        "dataset_from_index": 21826,
+        "dataset_to_index": 22333,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 44,
+        "length": 508,
+        "dataset_from_index": 22333,
+        "dataset_to_index": 22841,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 45,
+        "length": 507,
+        "dataset_from_index": 22841,
+        "dataset_to_index": 23348,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 46,
+        "length": 508,
+        "dataset_from_index": 23348,
+        "dataset_to_index": 23856,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 47,
+        "length": 507,
+        "dataset_from_index": 23856,
+        "dataset_to_index": 24363,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 48,
+        "length": 508,
+        "dataset_from_index": 24363,
+        "dataset_to_index": 24871,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      },
+      {
+        "episode_index": 49,
+        "length": 507,
+        "dataset_from_index": 24871,
+        "dataset_to_index": 25378,
+        "tasks": [
+          "Pick up the red cube and place it in the storage box."
+        ]
+      }
+    ]
+  },
+  "meta_info_json": {
+    "codebase_version": "v3.0",
+    "robot_type": "openarm_isaaclab",
+    "total_episodes": 50,
+    "total_frames": 25378,
+    "total_tasks": 1,
+    "chunks_size": 1000,
+    "data_files_size_in_mb": 100,
+    "video_files_size_in_mb": 200,
+    "fps": 30,
+    "splits": {
+      "train": "0:50"
+    },
+    "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+    "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+    "features": {
+      "observation.state": {
+        "dtype": "float32",
+        "shape": [
+          8
+        ],
+        "names": [
+          [
+            "joint_1",
+            "joint_2",
+            "joint_3",
+            "joint_4",
+            "joint_5",
+            "joint_6",
+            "joint_7",
+            "gripper"
+          ]
+        ]
+      },
+      "action": {
+        "dtype": "float32",
+        "shape": [
+          8
+        ],
+        "names": [
+          [
+            "joint_1",
+            "joint_2",
+            "joint_3",
+            "joint_4",
+            "joint_5",
+            "joint_6",
+            "joint_7",
+            "gripper"
+          ]
+        ]
+      },
+      "observation.images.top": {
+        "dtype": "video",
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "info": {
+          "video.height": 480,
+          "video.width": 640,
+          "video.codec": "av1",
+          "video.pix_fmt": "yuv420p",
+          "video.is_depth_map": false,
+          "video.fps": 30,
+          "video.channels": 3,
+          "has_audio": false
+        }
+      },
+      "observation.images.wrist": {
+        "dtype": "video",
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "info": {
+          "video.height": 480,
+          "video.width": 640,
+          "video.codec": "av1",
+          "video.pix_fmt": "yuv420p",
+          "video.is_depth_map": false,
+          "video.fps": 30,
+          "video.channels": 3,
+          "has_audio": false
+        }
+      },
+      "timestamp": {
+        "dtype": "float32",
+        "shape": [
+          1
+        ],
+        "names": null
+      },
+      "frame_index": {
+        "dtype": "int64",
+        "shape": [
+          1
+        ],
+        "names": null
+      },
+      "episode_index": {
+        "dtype": "int64",
+        "shape": [
+          1
+        ],
+        "names": null
+      },
+      "index": {
+        "dtype": "int64",
+        "shape": [
+          1
+        ],
+        "names": null
+      },
+      "task_index": {
+        "dtype": "int64",
+        "shape": [
+          1
+        ],
+        "names": null
+      }
+    }
+  },
+  "meta_stats_json": {
+    "task_index": {
+      "min": [
+        0
+      ],
+      "max": [
+        0
+      ],
+      "mean": [
+        0.0
+      ],
+      "std": [
+        0.0
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        3.9999999999994167e-16
+      ],
+      "q10": [
+        3.999999999999415e-15
+      ],
+      "q50": [
+        1.9999999999997088e-14
+      ],
+      "q90": [
+        3.5999999999994766e-14
+      ],
+      "q99": [
+        3.95999999999942e-14
+      ]
+    },
+    "index": {
+      "min": [
+        0
+      ],
+      "max": [
+        25377
+      ],
+      "mean": [
+        12688.5
+      ],
+      "std": [
+        7325.997560059655
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        12440.191710206533
+      ],
+      "q10": [
+        12485.287701798323
+      ],
+      "q50": [
+        12688.294906533214
+      ],
+      "q90": [
+        12891.712298201677
+      ],
+      "q99": [
+        12936.808289793466
+      ]
+    },
+    "observation.images.wrist": {
+      "min": [
+        [
+          [
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0
+          ]
+        ]
+      ],
+      "max": [
+        [
+          [
+            0.9686274509803922
+          ]
+        ],
+        [
+          [
+            0.9686274509803922
+          ]
+        ],
+        [
+          [
+            0.9882352941176471
+          ]
+        ]
+      ],
+      "mean": [
+        [
+          [
+            0.7583698123291795
+          ]
+        ],
+        [
+          [
+            0.6927010180370318
+          ]
+        ],
+        [
+          [
+            0.7159342546437367
+          ]
+        ]
+      ],
+      "std": [
+        [
+          [
+            0.006335243583532673
+          ]
+        ],
+        [
+          [
+            0.006487359730737512
+          ]
+        ],
+        [
+          [
+            0.007018992580390269
+          ]
+        ]
+      ],
+      "count": [
+        5328
+      ],
+      "q01": [
+        [
+          [
+            0.2463180445264166
+          ]
+        ],
+        [
+          [
+            0.21411996775294564
+          ]
+        ],
+        [
+          [
+            0.15792188809587981
+          ]
+        ]
+      ],
+      "q10": [
+        [
+          [
+            0.39204334266743807
+          ]
+        ],
+        [
+          [
+            0.3617951714942191
+          ]
+        ],
+        [
+          [
+            0.35807338030932867
+          ]
+        ]
+      ],
+      "q50": [
+        [
+          [
+            0.9019958626913002
+          ]
+        ],
+        [
+          [
+            0.872503128177058
+          ]
+        ],
+        [
+          [
+            0.8944821085393234
+          ]
+        ]
+      ],
+      "q90": [
+        [
+          [
+            0.9334148318353991
+          ]
+        ],
+        [
+          [
+            0.9137890162501223
+          ]
+        ],
+        [
+          [
+            0.9340451289449291
+          ]
+        ]
+      ],
+      "q99": [
+        [
+          [
+            0.9607386051246076
+          ]
+        ],
+        [
+          [
+            0.9607264839574561
+          ]
+        ],
+        [
+          [
+            0.9609174536329603
+          ]
+        ]
+      ]
+    },
+    "frame_index": {
+      "min": [
+        0
+      ],
+      "max": [
+        507
+      ],
+      "mean": [
+        253.28024272992354
+      ],
+      "std": [
+        146.520087293595
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        4.971952936461188
+      ],
+      "q10": [
+        50.06794452825138
+      ],
+      "q50": [
+        253.07514926314101
+      ],
+      "q90": [
+        456.4925409315955
+      ],
+      "q99": [
+        501.5885325233859
+      ]
+    },
+    "timestamp": {
+      "min": [
+        0.0
+      ],
+      "max": [
+        16.9
+      ],
+      "mean": [
+        8.44267475766413
+      ],
+      "std": [
+        4.884002909786496
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        0.16573176445393706
+      ],
+      "q10": [
+        1.6689314841974885
+      ],
+      "q50": [
+        8.435838308771297
+      ],
+      "q90": [
+        15.216418031130747
+      ],
+      "q99": [
+        16.7196177508743
+      ]
+    },
+    "observation.state": {
+      "min": [
+        -42.41660690307617,
+        -36.0837287902832,
+        -28.37936019897461,
+        0.04109315946698189,
+        -34.87739562988281,
+        -35.88875198364258,
+        -44.0014533996582,
+        -60.0
+      ],
+      "max": [
+        35.77202606201172,
+        8.804795265197754,
+        7.798331260681152,
+        108.90638732910156,
+        10.21412181854248,
+        7.9337968826293945,
+        49.561771392822266,
+        -15.0
+      ],
+      "mean": [
+        2.5763847196711067,
+        -9.001009920968244,
+        -5.624197578268587,
+        72.57725961252123,
+        -6.777791669647015,
+        -7.822625359854562,
+        4.7998372397765525,
+        -52.92561218366338
+      ],
+      "std": [
+        16.30990117021111,
+        13.438160252710464,
+        8.882295920252908,
+        20.24844586361312,
+        9.96834056881617,
+        12.683800460672494,
+        26.10958129436036,
+        9.90967084423051
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        -18.59203279625936,
+        -33.72575848824681,
+        -25.60218515519294,
+        38.799530389900845,
+        -27.139212944445717,
+        -34.33411662049079,
+        -44.001453399758205,
+        -60.0000000001
+      ],
+      "q10": [
+        -14.468725376044306,
+        -32.908155510220155,
+        -20.81301799889875,
+        45.298286183699354,
+        -22.81584944351101,
+        -33.03823941181883,
+        -37.61438894085263,
+        -60.0000000001
+      ],
+      "q50": [
+        -3.6684085224723737,
+        -2.5040650581294708,
+        -1.1940811121018722,
+        71.5110439243478,
+        -2.077786339093958,
+        -1.9463724382002852,
+        4.552155447743639,
+        -60.0000000001
+      ],
+      "q90": [
+        28.31031025202059,
+        1.823808134153099,
+        1.353199810445581,
+        100.33123001874233,
+        1.5861006182568431,
+        1.7752727265492276,
+        41.722832404580835,
+        -45.3766055221463
+      ],
+      "q99": [
+        35.65153707619389,
+        1.9395815268174308,
+        1.7488297004112243,
+        102.46166294225011,
+        2.1622020686288463,
+        2.0228613899187238,
+        48.25650151764176,
+        -15.003045362812765
+      ]
+    },
+    "action": {
+      "min": [
+        -42.621482849121094,
+        -37.15277099609375,
+        -28.955181121826172,
+        0.012805870734155178,
+        -36.155696868896484,
+        -36.0598030090332,
+        -43.999996185302734,
+        -60.0
+      ],
+      "max": [
+        36.6244010925293,
+        8.88471794128418,
+        7.830430507659912,
+        108.90724182128906,
+        10.303303718566895,
+        7.67306661605835,
+        50.35956954956055,
+        -15.0
+      ],
+      "mean": [
+        2.450483976872205,
+        -9.186501712764878,
+        -5.78294398360185,
+        72.6140108197958,
+        -6.9643761578139065,
+        -8.126409630617998,
+        5.085913150203793,
+        -41.82480773156168
+      ],
+      "std": [
+        16.28266025397189,
+        13.540173036523669,
+        9.024898825378022,
+        20.304592671002407,
+        10.09751221090993,
+        12.8445835362781,
+        25.89638931296879,
+        22.08044454299272
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        -18.594279042805205,
+        -33.7283937983124,
+        -26.242848892939474,
+        38.76797964837707,
+        -27.375765283028237,
+        -34.48901773297188,
+        -43.999996185402736,
+        -60.0000000001
+      ],
+      "q10": [
+        -14.415442999837497,
+        -32.91784899340064,
+        -21.01814388793673,
+        45.153445105248196,
+        -23.076916998830303,
+        -33.07081158547638,
+        -35.76913661353332,
+        -60.0000000001
+      ],
+      "q50": [
+        -3.688865003601615,
+        -2.5191867024541446,
+        -1.2096695183935027,
+        71.63903921054604,
+        -2.1355355163887224,
+        -2.041492714188839,
+        4.721052883252009,
+        -60.0000000001
+      ],
+      "q90": [
+        28.3346662185087,
+        1.8222733451246085,
+        1.3544681033542962,
+        100.39971773436082,
+        1.584048886264426,
+        1.6337183267066013,
+        41.76607456956429,
+        -15.002228314226416
+      ],
+      "q99": [
+        35.707147614684544,
+        1.9409871262002605,
+        1.7497693971106703,
+        102.50124907404908,
+        2.1682546330950805,
+        1.8699652449702846,
+        48.45903261339889,
+        -15.000222831332637
+      ]
+    },
+    "episode_index": {
+      "min": [
+        0
+      ],
+      "max": [
+        49
+      ],
+      "mean": [
+        24.497714555914566
+      ],
+      "std": [
+        14.430429883466758
+      ],
+      "count": [
+        25378
+      ],
+      "q01": [
+        24.497714555914566
+      ],
+      "q10": [
+        24.49771455591458
+      ],
+      "q50": [
+        24.497714555914584
+      ],
+      "q90": [
+        24.497714555914598
+      ],
+      "q99": [
+        24.497714555914598
+      ]
+    },
+    "observation.images.top": {
+      "min": [
+        [
+          [
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0
+          ]
+        ]
+      ],
+      "max": [
+        [
+          [
+            0.984313725490196
+          ]
+        ],
+        [
+          [
+            0.984313725490196
+          ]
+        ],
+        [
+          [
+            0.984313725490196
+          ]
+        ]
+      ],
+      "mean": [
+        [
+          [
+            0.5785886124328986
+          ]
+        ],
+        [
+          [
+            0.5705034201634234
+          ]
+        ],
+        [
+          [
+            0.5862268721693509
+          ]
+        ]
+      ],
+      "std": [
+        [
+          [
+            0.0011548420699407868
+          ]
+        ],
+        [
+          [
+            0.0012628111447456952
+          ]
+        ],
+        [
+          [
+            0.0009903209062013369
+          ]
+        ]
+      ],
+      "count": [
+        5328
+      ],
+      "q01": [
+        [
+          [
+            0.18065182806739002
+          ]
+        ],
+        [
+          [
+            0.17353265638175755
+          ]
+        ],
+        [
+          [
+            0.1803375828472577
+          ]
+        ]
+      ],
+      "q10": [
+        [
+          [
+            0.30200052415302403
+          ]
+        ],
+        [
+          [
+            0.30169775606036187
+          ]
+        ],
+        [
+          [
+            0.29811789610435113
+          ]
+        ]
+      ],
+      "q50": [
+        [
+          [
+            0.40365687498389025
+          ]
+        ],
+        [
+          [
+            0.3293780634596421
+          ]
+        ],
+        [
+          [
+            0.4043364270716193
+          ]
+        ]
+      ],
+      "q90": [
+        [
+          [
+            0.9332188866591427
+          ]
+        ],
+        [
+          [
+            0.932908406672136
+          ]
+        ],
+        [
+          [
+            0.9420736373928889
+          ]
+        ]
+      ],
+      "q99": [
+        [
+          [
+            0.9600873213785482
+          ]
+        ],
+        [
+          [
+            0.9605338103253743
+          ]
+        ],
+        [
+          [
+            0.9609036829592799
+          ]
+        ]
+      ]
+    }
+  },
+  "file_manifest": [
+    {
+      "relative_path": "data/chunk-000/file-000.parquet",
+      "size_bytes": 2427807,
+      "sha256": "93cb136f49307735f67352448cc0536e30feb9e0695133d7bfb6b7a42a2929e4"
+    },
+    {
+      "relative_path": "meta/episodes/chunk-000/file-000.parquet",
+      "size_bytes": 235269,
+      "sha256": "9b4cd67f860ceddef9561c1c89ec7d0ec3fbc91047c334938be1e48c5cbb8608"
+    },
+    {
+      "relative_path": "meta/info.json",
+      "size_bytes": 3386,
+      "sha256": "8f5bfeeb8997460cbbd126b3d7640904aa52d2822bc90b91632cbcad2b2297c7"
+    },
+    {
+      "relative_path": "meta/stats.json",
+      "size_bytes": 14186,
+      "sha256": "60af0d6fdab1e69c7c76eb6e8fb611181e5943513ef5d58c5db6b56a62c24e5e"
+    },
+    {
+      "relative_path": "meta/tasks.parquet",
+      "size_bytes": 2248,
+      "sha256": "c33b88761d905eff2593aff8774116ca618963836947501bf482013e40b27829"
+    },
+    {
+      "relative_path": "videos/observation.images.top/chunk-000/file-000.mp4",
+      "size_bytes": 133626649,
+      "sha256": "1082bb4bc34e6a44be7aed3737dc20e6d513fc50352f2cf98f4ec459b16fd861"
+    },
+    {
+      "relative_path": "videos/observation.images.wrist/chunk-000/file-000.mp4",
+      "size_bytes": 96353662,
+      "sha256": "5c60b83edc38239c2b1877e47d312a4e0ce2db830a43ae997d47fe4bf033bd5a"
+    }
+  ]
+}
