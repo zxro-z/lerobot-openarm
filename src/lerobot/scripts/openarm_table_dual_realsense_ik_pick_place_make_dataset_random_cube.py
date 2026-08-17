@@ -498,10 +498,69 @@ def match_record_camera_to_source(source_path: Sdf.Path, record_path: Sdf.Path) 
     print(f"[INFO] Dataset camera {record_path} matched to {source_path}")
 
 
-def create_dual_realsense_views(
-    scene: InteractiveScene, wrist_root_path: Sdf.Path
-) -> tuple[object, object]:
-    """Match both recording sensors and show both source color cameras."""
+def _prim_world_pose(path: Sdf.Path | str) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Return one prim's world pose as xyz and wxyz."""
+    stage = get_current_stage()
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        raise RuntimeError(f"Prim not found for world-pose query: {path}")
+    xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    world = xform_cache.GetLocalToWorldTransform(prim)
+    translation = world.ExtractTranslation()
+    rotation = world.ExtractRotationQuat()
+    imag = rotation.GetImaginary()
+    return (
+        (float(translation[0]), float(translation[1]), float(translation[2])),
+        (float(rotation.GetReal()), float(imag[0]), float(imag[1]), float(imag[2])),
+    )
+
+
+def _camera_forward_vector_world(path: Sdf.Path | str) -> tuple[float, float, float]:
+    """Return the world forward vector assuming the camera looks along local -Z."""
+    stage = get_current_stage()
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        raise RuntimeError(f"Prim not found for forward-vector query: {path}")
+    xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    world = xform_cache.GetLocalToWorldTransform(prim)
+    forward = world.TransformDir(Gf.Vec3d(0.0, 0.0, -1.0))
+    return (float(forward[0]), float(forward[1]), float(forward[2]))
+
+
+def log_wrist_camera_diagnostics(
+    scene: InteractiveScene,
+    wrist_root_path: Sdf.Path,
+    wrist_source_path: Sdf.Path | None = None,
+) -> None:
+    """Print the wrist camera and parent TCP world poses once for runtime inspection."""
+    env_root = scene.env_prim_paths[0]
+    tcp_path = find_descendant_prim_path(f"{env_root}/Robot", WRIST_PARENT_PRIM_NAME)
+    if wrist_source_path is None:
+        wrist_source_path = find_color_camera_path(wrist_root_path)
+    wrist_record_path = Sdf.Path(f"{env_root}/Robot/openarm_left_hand_tcp/WristColorCamera")
+    source_pos, source_quat = _prim_world_pose(wrist_source_path)
+    record_pos, record_quat = _prim_world_pose(wrist_record_path)
+    tcp_pos, tcp_quat = _prim_world_pose(tcp_path)
+    source_forward = _camera_forward_vector_world(wrist_source_path)
+    record_forward = _camera_forward_vector_world(wrist_record_path)
+    print(
+        "[CAMERA_DIAG][WRIST_SOURCE] "
+        f"path={wrist_source_path} world_pos={source_pos} world_quat_wxyz={source_quat} "
+        f"forward_world={source_forward}"
+    )
+    print(
+        "[CAMERA_DIAG][WRIST_RECORD] "
+        f"path={wrist_record_path} world_pos={record_pos} world_quat_wxyz={record_quat} "
+        f"forward_world={record_forward}"
+    )
+    print(
+        "[CAMERA_DIAG][WRIST_PARENT_TCP] "
+        f"path={tcp_path} world_pos={tcp_pos} world_quat_wxyz={tcp_quat}"
+    )
+
+
+def configure_dual_realsense_record_cameras(scene: InteractiveScene, wrist_root_path: Sdf.Path) -> tuple[Sdf.Path, Sdf.Path]:
+    """Match both recording sensors to the source RealSense camera prims."""
     env_root = scene.env_prim_paths[0]
     top_source_path = find_color_camera_path(Sdf.Path(f"{env_root}/Realsense"))
     wrist_source_path = find_color_camera_path(wrist_root_path)
@@ -513,6 +572,14 @@ def create_dual_realsense_views(
         wrist_source_path,
         Sdf.Path(f"{env_root}/Robot/openarm_left_hand_tcp/WristColorCamera"),
     )
+    return top_source_path, wrist_source_path
+
+
+def create_dual_realsense_views(
+    scene: InteractiveScene, wrist_root_path: Sdf.Path
+) -> tuple[object, object]:
+    """Show both source color cameras after record-camera poses have been matched."""
+    top_source_path, wrist_source_path = configure_dual_realsense_record_cameras(scene, wrist_root_path)
 
     top_view = create_viewport_window(
         name="Top RealSense Color",
@@ -996,6 +1063,8 @@ class MultiEpisodeLeRobotRecorder:
     def finalize(self) -> None:
         if self.finalized:
             return
+        if getattr(self.dataset, "image_writer", None) is not None:
+            self.dataset.stop_image_writer()
         if hasattr(self.dataset, "finalize"):
             self.dataset.finalize()
         if args_cli.push_to_hub:

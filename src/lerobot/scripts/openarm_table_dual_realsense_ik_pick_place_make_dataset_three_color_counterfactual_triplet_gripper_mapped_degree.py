@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import shutil
 import sys
 from contextlib import contextmanager
@@ -54,6 +55,30 @@ def _parse_counterfactual_args() -> tuple[argparse.Namespace, list[str]]:
         type=int,
         default=1000,
         help="Maximum attempts per cube position before resampling the whole layout.",
+    )
+    parser.add_argument(
+        "--layout_x_range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(-0.60, -0.50),
+        help="Default shared-layout cube x sampling range for counterfactual generation.",
+    )
+    parser.add_argument(
+        "--layout_y_range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(0.02, 0.15),
+        help="Default shared-layout cube y sampling range for counterfactual generation.",
+    )
+    parser.add_argument(
+        "--layout_tilt_deg_range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(0.0, 45.0),
+        help="Default shared TCP tilt range in degrees for each counterfactual layout.",
     )
     parser.add_argument(
         "--success_hold_time_s",
@@ -107,6 +132,18 @@ def _parse_counterfactual_args() -> tuple[argparse.Namespace, list[str]]:
         type=str,
         default="triplet_manifest.csv",
     )
+    parser.add_argument(
+        "--workspace_audit_csv",
+        type=str,
+        default=None,
+        help="Optional append-only CSV path for per-target grasp workspace audit rows.",
+    )
+    parser.add_argument(
+        "--show_viewports",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Opt in/out of preview viewport windows. Defaults to disabled in workspace audit mode.",
+    )
     return parser.parse_known_args()
 
 
@@ -123,6 +160,12 @@ if launcher_args.success_hold_time_s <= 0.0 or launcher_args.success_timeout_s <
     raise SystemExit("success hold/timeout values must be greater than zero")
 if launcher_args.episode_timeout_s <= 0.0:
     raise SystemExit("--episode_timeout_s must be greater than zero")
+if launcher_args.layout_x_range[0] > launcher_args.layout_x_range[1]:
+    raise SystemExit("--layout_x_range requires MIN <= MAX")
+if launcher_args.layout_y_range[0] > launcher_args.layout_y_range[1]:
+    raise SystemExit("--layout_y_range requires MIN <= MAX")
+if launcher_args.layout_tilt_deg_range[0] > launcher_args.layout_tilt_deg_range[1]:
+    raise SystemExit("--layout_tilt_deg_range requires MIN <= MAX")
 
 sys.argv = [sys.argv[0], *wrapped_argv]
 import openarm_table_dual_realsense_ik_pick_place_make_dataset_random_cube_random_tilt_gripper_mapped_degree as degree  # noqa: E402
@@ -133,6 +176,8 @@ base = degree.base
 torch = base.torch
 tilt_launcher = degree.mapped.launcher_args
 original_controller_init = degree.mapped._original_controller_init
+original_fail = base.PickPlaceController.fail
+original_enter = base.PickPlaceController.enter
 
 LEROBOT_SRC_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = LEROBOT_SRC_ROOT / "assets" / "openarm_use"
@@ -149,8 +194,9 @@ CUBE_RGB = {
     "blue": (0.03, 0.15, 0.90),
     "yellow": (0.95, 0.80, 0.03),
 }
-DEFAULT_X_RANGE = (-0.65, -0.50)
-DEFAULT_Y_RANGE = (0.02, 0.15)
+DEFAULT_X_RANGE = tuple(float(v) for v in launcher_args.layout_x_range)
+DEFAULT_Y_RANGE = tuple(float(v) for v in launcher_args.layout_y_range)
+DEFAULT_TILT_DEG_RANGE = tuple(float(v) for v in launcher_args.layout_tilt_deg_range)
 SUCCESS_X_HALF_EXTENT = 0.20 - base.CUBE_SIZE / 2.0
 SUCCESS_Y_HALF_EXTENT = 0.25 - base.CUBE_SIZE / 2.0
 SUCCESS_Z_RANGE = (0.04, 0.12)
@@ -158,9 +204,40 @@ TARGET_SLOT_BY_COLOR = {"red": 0, "blue": 1, "yellow": 2}
 
 ACTIVE_COLOR = "red"
 ACTIVE_LAYOUT = None
+ACTIVE_CANDIDATE_ATTEMPT = None
 FINAL_DATASET_ROOT = Path(base.args_cli.dataset_root).expanduser().resolve()
 FINAL_REPO_ID = base.args_cli.dataset_repo_id
 FINAL_TOTAL_EPISODES = launcher_args.num_layouts * len(COLORS)
+WORKSPACE_AUDIT_LOGGER = None
+WORKSPACE_AUDIT_MODE = launcher_args.workspace_audit_csv is not None
+
+WORKSPACE_AUDIT_FIELDNAMES = [
+    "layout_id",
+    "candidate_attempt",
+    "layout_seed",
+    "target_color",
+    "cube_x",
+    "cube_y",
+    "cube_z",
+    "tcp_tilt_deg",
+    "grasp_success",
+    "grasp_target_base_x",
+    "grasp_target_base_y",
+    "grasp_target_base_z",
+    "current_ee_base_x",
+    "current_ee_base_y",
+    "current_ee_base_z",
+    "xyz_error_x",
+    "xyz_error_y",
+    "xyz_error_z",
+    "xyz_error_norm",
+    "orientation_error_norm",
+    "position_tolerance",
+    "rotation_tolerance",
+    "failure_reason",
+    "descend_state_time_s",
+    "trajectory_finished_expected",
+]
 
 
 @dataclass(frozen=True)
@@ -183,6 +260,25 @@ class LayoutSpec:
     blue_pose: CubePose
     yellow_pose: CubePose
     robot_initial_state_deg: tuple[float, ...]
+
+
+class WorkspaceAuditLogger:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        file_exists = self.path.exists()
+        self._file = self.path.open("a", newline="")
+        self._writer = csv.DictWriter(self._file, fieldnames=WORKSPACE_AUDIT_FIELDNAMES)
+        if not file_exists or self.path.stat().st_size == 0:
+            self._writer.writeheader()
+            self._file.flush()
+
+    def append_row(self, row: dict[str, object]) -> None:
+        self._writer.writerow(row)
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
 
 
 def _cube_cfg(color: str):
@@ -229,8 +325,14 @@ def cube_pose_from_components(position: tuple[float, float, float], quat_wxyz: t
     )
 
 
-def sample_layout(scene, layout_id: int) -> LayoutSpec:
-    layout_seed = launcher_args.layout_base_seed + layout_id
+def sample_layout(scene, layout_id: int, candidate_index: int = 0) -> LayoutSpec:
+    # Retry attempts must consume a new deterministic candidate seed; otherwise
+    # an IK-infeasible layout will repeat forever for the same layout_id.
+    layout_seed = (
+        launcher_args.layout_base_seed
+        + layout_id * launcher_args.max_triplet_attempts
+        + candidate_index
+    )
     rng = np.random.default_rng(layout_seed)
     x_limits = base.args_cli.cube_x_range or DEFAULT_X_RANGE
     y_limits = base.args_cli.cube_y_range or DEFAULT_Y_RANGE
@@ -264,7 +366,7 @@ def sample_layout(scene, layout_id: int) -> LayoutSpec:
     shuffled_colors = list(COLORS)
     rng.shuffle(shuffled_colors)
     positions_by_color = dict(zip(shuffled_colors, sampled_positions, strict=True))
-    tilt_deg = float(rng.uniform(tilt_launcher.tilt_deg_range[0], tilt_launcher.tilt_deg_range[1]))
+    tilt_deg = float(rng.uniform(DEFAULT_TILT_DEG_RANGE[0], DEFAULT_TILT_DEG_RANGE[1]))
     robot_initial_state = tuple(float(v) for v in np.rad2deg(scene["robot"].data.default_joint_pos[0].detach().cpu().numpy()))
 
     return LayoutSpec(
@@ -329,6 +431,94 @@ def task_for_color(color: str) -> str:
     return f"Pick up the {color} cube and place it in the storage box."
 
 
+def collect_grasp_pose_diagnostics(self) -> dict[str, object]:
+    assert self.goal_pos_b is not None
+    ee_pos_b, ee_quat_b = self.ee_pose_b()
+    pos_error, rot_error = base.compute_pose_error(
+        ee_pos_b,
+        ee_quat_b,
+        self.goal_pos_b.unsqueeze(0),
+        self.grasp_quat_b,
+        rot_error_type="axis_angle",
+    )
+    pos_norm = torch.linalg.norm(pos_error[0]).item()
+    rot_norm = torch.linalg.norm(rot_error[0]).item()
+    return {
+        "target_color": getattr(self, "target_color", "unknown"),
+        "target_cube_world_xyz": self.cube.data.root_pos_w[0].detach().cpu().tolist(),
+        "grasp_target_base_xyz": self.goal_pos_b.detach().cpu().tolist(),
+        "current_ee_base_xyz": ee_pos_b[0].detach().cpu().tolist(),
+        "current_ee_base_quat_wxyz": ee_quat_b[0].detach().cpu().tolist(),
+        "target_base_quat_wxyz": self.grasp_quat_b[0].detach().cpu().tolist(),
+        "xyz_error_base": pos_error[0].detach().cpu().tolist(),
+        "xyz_error_norm": pos_norm,
+        "orientation_error_axis_angle": rot_error[0].detach().cpu().tolist(),
+        "orientation_error_norm": rot_norm,
+        "descend_state_time_s": float(self.state_time),
+        "trajectory_finished_expected": bool(self.state_time >= base.args_cli.short_move_time_s),
+        "grasp_position_tolerance": float(base.args_cli.grasp_position_tolerance),
+        "grasp_rotation_tolerance": float(base.args_cli.grasp_rotation_tolerance),
+        "ik_failure_timeout_s": float(base.args_cli.ik_failure_timeout_s),
+        "short_move_time_s": float(base.args_cli.short_move_time_s),
+    }
+
+
+def maybe_append_workspace_audit_row(
+    controller,
+    *,
+    grasp_success: bool,
+    failure_reason: str,
+    diagnostics: dict[str, object] | None = None,
+) -> None:
+    global WORKSPACE_AUDIT_LOGGER
+    if WORKSPACE_AUDIT_LOGGER is None or ACTIVE_LAYOUT is None or ACTIVE_CANDIDATE_ATTEMPT is None:
+        return
+    if getattr(controller, "_workspace_audit_logged", False):
+        return
+    if diagnostics is None:
+        diagnostics = collect_grasp_pose_diagnostics(controller)
+
+    cube_xyz = diagnostics["target_cube_world_xyz"]
+    grasp_target_xyz = diagnostics["grasp_target_base_xyz"]
+    current_ee_xyz = diagnostics["current_ee_base_xyz"]
+    xyz_error = diagnostics["xyz_error_base"]
+    row = {
+        "layout_id": ACTIVE_LAYOUT.layout_id,
+        "candidate_attempt": ACTIVE_CANDIDATE_ATTEMPT,
+        "layout_seed": ACTIVE_LAYOUT.layout_seed,
+        "target_color": diagnostics["target_color"],
+        "cube_x": float(cube_xyz[0]),
+        "cube_y": float(cube_xyz[1]),
+        "cube_z": float(cube_xyz[2]),
+        "tcp_tilt_deg": float(ACTIVE_LAYOUT.tcp_tilt_deg),
+        "grasp_success": int(grasp_success),
+        "grasp_target_base_x": float(grasp_target_xyz[0]),
+        "grasp_target_base_y": float(grasp_target_xyz[1]),
+        "grasp_target_base_z": float(grasp_target_xyz[2]),
+        "current_ee_base_x": float(current_ee_xyz[0]),
+        "current_ee_base_y": float(current_ee_xyz[1]),
+        "current_ee_base_z": float(current_ee_xyz[2]),
+        "xyz_error_x": float(xyz_error[0]),
+        "xyz_error_y": float(xyz_error[1]),
+        "xyz_error_z": float(xyz_error[2]),
+        "xyz_error_norm": float(diagnostics["xyz_error_norm"]),
+        "orientation_error_norm": float(diagnostics["orientation_error_norm"]),
+        "position_tolerance": float(diagnostics["grasp_position_tolerance"]),
+        "rotation_tolerance": float(diagnostics["grasp_rotation_tolerance"]),
+        "failure_reason": failure_reason,
+        "descend_state_time_s": float(diagnostics["descend_state_time_s"]),
+        "trajectory_finished_expected": int(bool(diagnostics["trajectory_finished_expected"])),
+    }
+    WORKSPACE_AUDIT_LOGGER.append_row(row)
+    controller._workspace_audit_logged = True
+    print(
+        f"[WORKSPACE_AUDIT] seed={ACTIVE_LAYOUT.layout_seed} target={row['target_color']} "
+        f"cube=({row['cube_x']:.4f},{row['cube_y']:.4f}) tilt={row['tcp_tilt_deg']:.2f} "
+        f"success={row['grasp_success']} xyz_err={row['xyz_error_norm']:.5f} "
+        f"rot_err={row['orientation_error_norm']:.5f}"
+    )
+
+
 def _counterfactual_controller_init(self, robot, scene) -> None:
     if ACTIVE_LAYOUT is None:
         raise RuntimeError("ACTIVE_LAYOUT must be set before creating the controller.")
@@ -340,9 +530,51 @@ def _counterfactual_controller_init(self, robot, scene) -> None:
     original_controller_init(self, robot, scene)
     self.cube = scene[CUBE_ASSET_NAMES[ACTIVE_COLOR]]
     self.target_color = ACTIVE_COLOR
+    self._last_grasp_debug = None
+    self._last_descend_trajectory_finished = False
+    self._workspace_audit_logged = False
 
 
 base.PickPlaceController.__init__ = _counterfactual_controller_init
+
+
+def _debug_grasp_pose_reached(self) -> bool:
+    self._last_grasp_debug = collect_grasp_pose_diagnostics(self)
+    return (
+        float(self._last_grasp_debug["xyz_error_norm"]) <= base.args_cli.grasp_position_tolerance
+        and float(self._last_grasp_debug["orientation_error_norm"]) <= base.args_cli.grasp_rotation_tolerance
+    )
+
+
+def _audit_enter(self, state: str, goal=None) -> None:
+    if state == "close_gripper" and self.state == "descend_to_grasp":
+        diagnostics = getattr(self, "_last_grasp_debug", None)
+        maybe_append_workspace_audit_row(
+            self,
+            grasp_success=True,
+            failure_reason="",
+            diagnostics=diagnostics,
+        )
+    original_enter(self, state, goal)
+
+
+def _debug_fail(self, reason: str) -> None:
+    if reason.startswith("grasp IK target was not reached"):
+        debug = getattr(self, "_last_grasp_debug", None)
+        if debug is not None:
+            print(f"[DIAG][GRASP_IK] {debug}")
+        maybe_append_workspace_audit_row(
+            self,
+            grasp_success=False,
+            failure_reason=reason,
+            diagnostics=debug,
+        )
+    original_fail(self, reason)
+
+
+base.PickPlaceController.grasp_pose_reached = _debug_grasp_pose_reached
+base.PickPlaceController.enter = _audit_enter
+base.PickPlaceController.fail = _debug_fail
 
 
 @contextmanager
@@ -371,18 +603,51 @@ def ensure_clean_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def remove_dir_if_exists(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+
+
 def stage_repo_id(layout_id: int) -> str:
     return f"{FINAL_REPO_ID}_layout_{layout_id:03d}"
 
 
-def record_layout_triplet_v2(sim, scene, layout: LayoutSpec, staging_root: Path) -> tuple[bool, str, Path]:
-    global ACTIVE_COLOR, ACTIVE_LAYOUT
+def close_preview_viewports(viewports: tuple[object, object] | None) -> None:
+    if viewports is None:
+        return
+    for viewport in viewports:
+        if viewport is None:
+            continue
+        if hasattr(viewport, "visible"):
+            viewport.visible = False
+        if hasattr(viewport, "destroy"):
+            viewport.destroy()
+
+
+def audit_mode_hard_exit() -> None:
+    # Audit-only workaround: Isaac Kit teardown may hang inside simulation_app.close()
+    # after all workspace audit rows and staging cleanup have already completed.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
+def record_layout_triplet_v2(
+    sim,
+    scene,
+    layout: LayoutSpec,
+    staging_root: Path,
+    *,
+    candidate_attempt: int,
+) -> tuple[bool, str, Path]:
+    global ACTIVE_COLOR, ACTIVE_LAYOUT, ACTIVE_CANDIDATE_ATTEMPT
     dt = sim.get_physics_dt()
     layout_stage_root = stage_root_for_layout(staging_root, layout.layout_id)
-    ensure_clean_dir(layout_stage_root)
+    remove_dir_if_exists(layout_stage_root)
     repo_id = stage_repo_id(layout.layout_id)
     recorder = None
     try:
+        ACTIVE_CANDIDATE_ATTEMPT = candidate_attempt
         with temporary_dataset_args(dataset_root=layout_stage_root, dataset_repo_id=repo_id, num_episodes=3):
             for target_idx, target_color in enumerate(COLORS):
                 global ACTIVE_COLOR, ACTIVE_LAYOUT
@@ -429,14 +694,19 @@ def record_layout_triplet_v2(sim, scene, layout: LayoutSpec, staging_root: Path)
                         )
 
                 if controller.state == "failed":
+                    print("[TRACE] after_triplet_failure")
                     recorder.discard_episode(controller.failure_reason or "IK failure")
                     recorder.finalize()
+                    print("[TRACE] before_staging_cleanup")
                     shutil.rmtree(layout_stage_root, ignore_errors=True)
+                    print("[TRACE] after_staging_cleanup")
                     return False, controller.failure_reason or "IK failure", layout_stage_root
                 if controller.state != "done":
                     recorder.discard_episode("simulation_stopped")
                     recorder.finalize()
+                    print("[TRACE] before_staging_cleanup")
                     shutil.rmtree(layout_stage_root, ignore_errors=True)
+                    print("[TRACE] after_staging_cleanup")
                     return False, "simulation_stopped", layout_stage_root
 
                 success_time = 0.0
@@ -459,7 +729,9 @@ def record_layout_triplet_v2(sim, scene, layout: LayoutSpec, staging_root: Path)
                         f"target-specific quality check failed for {target_color}: {last_detail}"
                     )
                     recorder.finalize()
+                    print("[TRACE] before_staging_cleanup")
                     shutil.rmtree(layout_stage_root, ignore_errors=True)
+                    print("[TRACE] after_staging_cleanup")
                     return False, f"quality_failed:{last_detail}", layout_stage_root
 
                 recorder.record_if_needed(0.0, force=True)
@@ -470,6 +742,7 @@ def record_layout_triplet_v2(sim, scene, layout: LayoutSpec, staging_root: Path)
                 )
     finally:
         ACTIVE_LAYOUT = None
+        ACTIVE_CANDIDATE_ATTEMPT = None
 
     if recorder is not None:
         recorder.finalize()
@@ -582,6 +855,12 @@ def aggregate_layout_datasets(stage_roots: list[Path]) -> None:
 
 
 def main() -> None:
+    global WORKSPACE_AUDIT_LOGGER
+    if launcher_args.workspace_audit_csv is not None:
+        WORKSPACE_AUDIT_LOGGER = WorkspaceAuditLogger(Path(launcher_args.workspace_audit_csv).expanduser().resolve())
+    show_viewports = launcher_args.show_viewports
+    if show_viewports is None:
+        show_viewports = not WORKSPACE_AUDIT_MODE
     sim = base.SimulationContext(base.sim_utils.SimulationCfg(device=base.args_cli.device, dt=1.0 / 120.0))
     sim.set_camera_view(eye=[1.0, -1.35, 0.85], target=[-0.35, -0.2, 0.15])
     scene_cfg = ThreeColorCounterfactualSceneCfg(num_envs=1, env_spacing=1.0)
@@ -592,7 +871,11 @@ def main() -> None:
     scene = base.InteractiveScene(scene_cfg)
     wrist_root_path = base.attach_wrist_realsense(scene)
     sim.reset()
-    base.create_dual_realsense_views(scene, wrist_root_path)
+    _, wrist_source_path = base.configure_dual_realsense_record_cameras(scene, wrist_root_path)
+    base.log_wrist_camera_diagnostics(scene, wrist_root_path, wrist_source_path)
+    preview_viewports = None
+    if show_viewports:
+        preview_viewports = base.create_dual_realsense_views(scene, wrist_root_path)
     print(
         f"[INFO] Counterfactual triplet dataset: {launcher_args.num_layouts} layouts x 3 colors = "
         f"{FINAL_TOTAL_EPISODES} episodes"
@@ -603,47 +886,79 @@ def main() -> None:
     )
     print(
         f"[INFO] Tilt range reused per layout: "
-        f"[{tilt_launcher.tilt_deg_range[0]:.2f}, {tilt_launcher.tilt_deg_range[1]:.2f}] deg"
+        f"[{DEFAULT_TILT_DEG_RANGE[0]:.2f}, {DEFAULT_TILT_DEG_RANGE[1]:.2f}] deg"
     )
 
     staging_root = resolve_staging_root()
     ensure_clean_dir(staging_root)
 
-    successful_layouts: list[LayoutSpec] = []
-    successful_stage_roots: list[Path] = []
-    for layout_id in range(launcher_args.num_layouts):
-        success = False
-        for attempt in range(1, launcher_args.max_triplet_attempts + 1):
-            layout = sample_layout(scene, layout_id)
-            print(
-                f"\n[TRIPLET] layout_id={layout_id:03d} attempt={attempt} "
-                f"seed={layout.layout_seed} tilt={layout.tcp_tilt_deg:.2f}"
-            )
-            ok, reason, stage_root = record_layout_triplet_v2(sim, scene, layout, staging_root)
-            if ok:
-                successful_layouts.append(layout)
-                successful_stage_roots.append(stage_root)
-                success = True
-                break
-            print(f"[TRIPLET][RETRY] layout_id={layout_id:03d} reason={reason}")
-        if not success:
-            raise RuntimeError(
-                f"Failed to record complete triplet for layout_id={layout_id} "
-                f"after {launcher_args.max_triplet_attempts} attempts."
-            )
+    try:
+        successful_layouts: list[LayoutSpec] = []
+        successful_stage_roots: list[Path] = []
+        for layout_id in range(launcher_args.num_layouts):
+            success = False
+            for attempt in range(1, launcher_args.max_triplet_attempts + 1):
+                layout = sample_layout(scene, layout_id, candidate_index=attempt - 1)
+                print(
+                    f"\n[TRIPLET] layout_id={layout_id:03d} attempt={attempt} "
+                    f"seed={layout.layout_seed} tilt={layout.tcp_tilt_deg:.2f}"
+                )
+                ok, reason, stage_root = record_layout_triplet_v2(
+                    sim,
+                    scene,
+                    layout,
+                    staging_root,
+                    candidate_attempt=attempt,
+                )
+                if ok:
+                    successful_layouts.append(layout)
+                    successful_stage_roots.append(stage_root)
+                    success = True
+                    break
+                print(f"[TRIPLET][RETRY] layout_id={layout_id:03d} reason={reason}")
+            print("[TRACE] leaving_attempt_loop")
+            if not success:
+                print("[TRACE] layout_exhausted")
+                if WORKSPACE_AUDIT_MODE:
+                    print(
+                        f"[RESULT] workspace_audit layout exhausted "
+                        f"layout_id={layout_id:03d} attempts={launcher_args.max_triplet_attempts}"
+                    )
+                    continue
+                raise RuntimeError(
+                    f"Failed to record complete triplet for layout_id={layout_id} "
+                    f"after {launcher_args.max_triplet_attempts} attempts."
+                )
+            if WORKSPACE_AUDIT_MODE:
+                print(f"[RESULT] workspace_audit candidate complete layout_id={layout_id:03d}")
 
-    aggregate_layout_datasets(successful_stage_roots)
-    write_csv(FINAL_DATASET_ROOT / launcher_args.layout_manifest_name, layout_manifest_rows(successful_layouts))
-    write_csv(FINAL_DATASET_ROOT / launcher_args.triplet_manifest_name, triplet_manifest_rows(successful_layouts, successful_stage_roots))
+        if WORKSPACE_AUDIT_MODE:
+            if not launcher_args.keep_staging:
+                shutil.rmtree(staging_root, ignore_errors=True)
+        else:
+            aggregate_layout_datasets(successful_stage_roots)
+            write_csv(FINAL_DATASET_ROOT / launcher_args.layout_manifest_name, layout_manifest_rows(successful_layouts))
+            write_csv(FINAL_DATASET_ROOT / launcher_args.triplet_manifest_name, triplet_manifest_rows(successful_layouts, successful_stage_roots))
 
-    if not launcher_args.keep_staging:
-        shutil.rmtree(staging_root, ignore_errors=True)
+            if not launcher_args.keep_staging:
+                shutil.rmtree(staging_root, ignore_errors=True)
 
-    print(f"[RESULT] dataset_root={FINAL_DATASET_ROOT}")
-    print(f"[RESULT] repo_id={FINAL_REPO_ID}")
-    print(f"[RESULT] layout_manifest={FINAL_DATASET_ROOT / launcher_args.layout_manifest_name}")
-    print(f"[RESULT] triplet_manifest={FINAL_DATASET_ROOT / launcher_args.triplet_manifest_name}")
-    base.simulation_app.close()
+            print(f"[RESULT] dataset_root={FINAL_DATASET_ROOT}")
+            print(f"[RESULT] repo_id={FINAL_REPO_ID}")
+            print(f"[RESULT] layout_manifest={FINAL_DATASET_ROOT / launcher_args.layout_manifest_name}")
+            print(f"[RESULT] triplet_manifest={FINAL_DATASET_ROOT / launcher_args.triplet_manifest_name}")
+    finally:
+        if WORKSPACE_AUDIT_LOGGER is not None:
+            WORKSPACE_AUDIT_LOGGER.close()
+            WORKSPACE_AUDIT_LOGGER = None
+        print("[TRACE] before_env_close")
+        close_preview_viewports(preview_viewports)
+        print("[TRACE] after_env_close")
+        print("[TRACE] before_simulation_app_close")
+        if WORKSPACE_AUDIT_MODE:
+            audit_mode_hard_exit()
+        base.simulation_app.close()
+        print("[TRACE] after_simulation_app_close")
 
 
 if __name__ == "__main__":

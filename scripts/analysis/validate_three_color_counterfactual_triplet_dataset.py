@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("src/lerobot/datasets/openarm_three_color_counterfactual_triplet_50"),
+        default=Path("/home/zxro/arena/lerobot/src/lerobot/datasets/openarm_three_color_counterfactual_triplet_50"),
     )
     parser.add_argument(
         "--layout-manifest",
