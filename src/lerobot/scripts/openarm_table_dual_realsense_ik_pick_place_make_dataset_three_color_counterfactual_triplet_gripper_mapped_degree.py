@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 import shutil
@@ -108,7 +109,7 @@ def _parse_counterfactual_args() -> tuple[argparse.Namespace, list[str]]:
         "--max_triplet_attempts",
         type=int,
         default=100,
-        help="Maximum full-layout retries before aborting a single layout_id.",
+        help="Maximum spatial-layout retries before aborting a single layout_id.",
     )
     parser.add_argument(
         "--staging_root",
@@ -121,6 +122,11 @@ def _parse_counterfactual_args() -> tuple[argparse.Namespace, list[str]]:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Keep successful per-layout staging datasets after final aggregation.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from completed per-layout staging datasets without deleting them.",
     )
     parser.add_argument(
         "--layout_manifest_name",
@@ -196,7 +202,14 @@ CUBE_RGB = {
 }
 DEFAULT_X_RANGE = tuple(float(v) for v in launcher_args.layout_x_range)
 DEFAULT_Y_RANGE = tuple(float(v) for v in launcher_args.layout_y_range)
-DEFAULT_TILT_DEG_RANGE = tuple(float(v) for v in launcher_args.layout_tilt_deg_range)
+DEFAULT_TILT_DEG_GRID = (
+    0.0,
+    10.0,
+    20.0,
+    30.0,
+    40.0,
+    45.0,
+)
 SUCCESS_X_HALF_EXTENT = 0.20 - base.CUBE_SIZE / 2.0
 SUCCESS_Y_HALF_EXTENT = 0.25 - base.CUBE_SIZE / 2.0
 SUCCESS_Z_RANGE = (0.04, 0.12)
@@ -210,6 +223,7 @@ FINAL_REPO_ID = base.args_cli.dataset_repo_id
 FINAL_TOTAL_EPISODES = launcher_args.num_layouts * len(COLORS)
 WORKSPACE_AUDIT_LOGGER = None
 WORKSPACE_AUDIT_MODE = launcher_args.workspace_audit_csv is not None
+LAYOUT_SPEC_FILENAME = "layout_spec.json"
 
 WORKSPACE_AUDIT_FIELDNAMES = [
     "layout_id",
@@ -255,7 +269,10 @@ class CubePose:
 class LayoutSpec:
     layout_id: int
     layout_seed: int
+    spatial_candidate_index: int
     tcp_tilt_deg: float
+    initial_tilt_deg: float
+    tilt_attempt_count: int
     red_pose: CubePose
     blue_pose: CubePose
     yellow_pose: CubePose
@@ -325,9 +342,9 @@ def cube_pose_from_components(position: tuple[float, float, float], quat_wxyz: t
     )
 
 
-def sample_layout(scene, layout_id: int, candidate_index: int = 0) -> LayoutSpec:
-    # Retry attempts must consume a new deterministic candidate seed; otherwise
-    # an IK-infeasible layout will repeat forever for the same layout_id.
+def sample_layout(scene, layout_id: int, candidate_index: int = 0, tilt_attempt_offset: int = 0) -> LayoutSpec:
+    # Spatial-layout retries must consume a new deterministic candidate seed;
+    # otherwise an IK-infeasible layout will repeat forever for the same layout_id.
     layout_seed = (
         launcher_args.layout_base_seed
         + layout_id * launcher_args.max_triplet_attempts
@@ -366,13 +383,24 @@ def sample_layout(scene, layout_id: int, candidate_index: int = 0) -> LayoutSpec
     shuffled_colors = list(COLORS)
     rng.shuffle(shuffled_colors)
     positions_by_color = dict(zip(shuffled_colors, sampled_positions, strict=True))
-    tilt_deg = float(rng.uniform(DEFAULT_TILT_DEG_RANGE[0], DEFAULT_TILT_DEG_RANGE[1]))
+    initial_tilt_index = int(rng.integers(0, len(DEFAULT_TILT_DEG_GRID)))
+    selected_tilt_index = initial_tilt_index + tilt_attempt_offset
+    if selected_tilt_index >= len(DEFAULT_TILT_DEG_GRID):
+        raise ValueError(
+            f"tilt_attempt_offset={tilt_attempt_offset} exhausts DEFAULT_TILT_DEG_GRID for "
+            f"layout_id={layout_id}, spatial_candidate_index={candidate_index}"
+        )
+    initial_tilt_deg = float(DEFAULT_TILT_DEG_GRID[initial_tilt_index])
+    tilt_deg = float(DEFAULT_TILT_DEG_GRID[selected_tilt_index])
     robot_initial_state = tuple(float(v) for v in np.rad2deg(scene["robot"].data.default_joint_pos[0].detach().cpu().numpy()))
 
     return LayoutSpec(
         layout_id=layout_id,
         layout_seed=layout_seed,
+        spatial_candidate_index=candidate_index,
         tcp_tilt_deg=tilt_deg,
+        initial_tilt_deg=initial_tilt_deg,
+        tilt_attempt_count=tilt_attempt_offset + 1,
         red_pose=cube_pose_from_components(positions_by_color["red"], default_quat),
         blue_pose=cube_pose_from_components(positions_by_color["blue"], default_quat),
         yellow_pose=cube_pose_from_components(positions_by_color["yellow"], default_quat),
@@ -577,6 +605,52 @@ base.PickPlaceController.enter = _audit_enter
 base.PickPlaceController.fail = _debug_fail
 
 
+def serialize_layout_spec(layout: LayoutSpec) -> dict[str, object]:
+    return {
+        "layout_id": layout.layout_id,
+        "layout_seed": layout.layout_seed,
+        "spatial_candidate_index": layout.spatial_candidate_index,
+        "tcp_tilt_deg": layout.tcp_tilt_deg,
+        "initial_tilt_deg": layout.initial_tilt_deg,
+        "tilt_attempt_count": layout.tilt_attempt_count,
+        "red_pose": layout.red_pose.__dict__,
+        "blue_pose": layout.blue_pose.__dict__,
+        "yellow_pose": layout.yellow_pose.__dict__,
+        "robot_initial_state_deg": list(layout.robot_initial_state_deg),
+    }
+
+
+def deserialize_layout_spec(payload: dict[str, object]) -> LayoutSpec:
+    tcp_tilt_deg = float(payload["tcp_tilt_deg"])
+    return LayoutSpec(
+        layout_id=int(payload["layout_id"]),
+        layout_seed=int(payload["layout_seed"]),
+        spatial_candidate_index=int(payload.get("spatial_candidate_index", 0)),
+        tcp_tilt_deg=tcp_tilt_deg,
+        initial_tilt_deg=float(payload.get("initial_tilt_deg", tcp_tilt_deg)),
+        tilt_attempt_count=int(payload.get("tilt_attempt_count", 1)),
+        red_pose=CubePose(**payload["red_pose"]),
+        blue_pose=CubePose(**payload["blue_pose"]),
+        yellow_pose=CubePose(**payload["yellow_pose"]),
+        robot_initial_state_deg=tuple(float(v) for v in payload["robot_initial_state_deg"]),
+    )
+
+
+def write_layout_spec(stage_root: Path, layout: LayoutSpec) -> None:
+    metadata_path = stage_root / LAYOUT_SPEC_FILENAME
+    metadata_path.write_text(json.dumps(serialize_layout_spec(layout), indent=2), encoding="utf-8")
+
+
+def load_layout_spec_from_stage(stage_root: Path) -> LayoutSpec | None:
+    metadata_path = stage_root / LAYOUT_SPEC_FILENAME
+    if not metadata_path.exists():
+        return None
+    try:
+        return deserialize_layout_spec(json.loads(metadata_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
 @contextmanager
 def temporary_dataset_args(*, dataset_root: Path, dataset_repo_id: str, num_episodes: int):
     old_root = base.args_cli.dataset_root
@@ -612,6 +686,218 @@ def stage_repo_id(layout_id: int) -> str:
     return f"{FINAL_REPO_ID}_layout_{layout_id:03d}"
 
 
+def stage_layout_id_from_path(path: Path) -> int | None:
+    if not path.is_dir() or not path.name.startswith("layout_"):
+        return None
+    suffix = path.name.removeprefix("layout_")
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _stage_has_required_videos(stage_root: Path, info: dict[str, object]) -> bool:
+    features = info.get("features", {})
+    if not isinstance(features, dict):
+        return False
+    video_keys = [key for key, spec in features.items() if isinstance(spec, dict) and spec.get("dtype") == "video"]
+    for video_key in video_keys:
+        if not any((stage_root / "videos" / video_key).rglob("*.mp4")):
+            return False
+    return True
+
+
+def _stage_has_expected_tasks(stage_root: Path) -> bool:
+    tasks_path = stage_root / "meta" / "tasks.parquet"
+    if not tasks_path.exists():
+        return False
+    try:
+        import pyarrow.parquet as pq
+    except ModuleNotFoundError:
+        return True
+
+    expected_tasks = {task_for_color(color) for color in COLORS}
+    try:
+        rows = pq.read_table(tasks_path).to_pylist()
+    except Exception:
+        return False
+
+    discovered_text = set()
+    for row in rows:
+        for value in row.values():
+            if isinstance(value, str):
+                discovered_text.add(value)
+    return expected_tasks.issubset(discovered_text)
+
+
+def is_complete_layout_stage(stage_root: Path) -> bool:
+    info_path = stage_root / "meta" / "info.json"
+    if not info_path.exists():
+        return False
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if int(info.get("total_episodes", -1)) != len(COLORS):
+        return False
+    if int(info.get("total_tasks", -1)) != len(COLORS):
+        return False
+    if not any((stage_root / "meta" / "episodes").rglob("*.parquet")):
+        return False
+    if not any((stage_root / "data").rglob("*.parquet")):
+        return False
+    if not (stage_root / "meta" / "stats.json").exists():
+        return False
+    if not _stage_has_required_videos(stage_root, info):
+        return False
+    if not _stage_has_expected_tasks(stage_root):
+        return False
+    return True
+
+
+def scan_resume_staging(staging_root: Path) -> tuple[list[int], list[Path], list[int]]:
+    staging_root.mkdir(parents=True, exist_ok=True)
+    completed_ids: list[int] = []
+    completed_roots: list[Path] = []
+    removed_ids: list[int] = []
+
+    stop_layout_id = launcher_args.num_layouts
+    for layout_id in range(launcher_args.num_layouts):
+        stage_root = stage_root_for_layout(staging_root, layout_id)
+        if not stage_root.exists():
+            stop_layout_id = layout_id
+            break
+        if is_complete_layout_stage(stage_root):
+            completed_ids.append(layout_id)
+            completed_roots.append(stage_root)
+            continue
+        remove_dir_if_exists(stage_root)
+        removed_ids.append(layout_id)
+        stop_layout_id = layout_id
+        break
+
+    for extra_stage_root in sorted(staging_root.glob("layout_*")):
+        layout_id = stage_layout_id_from_path(extra_stage_root)
+        if layout_id is None or layout_id < stop_layout_id or layout_id >= launcher_args.num_layouts:
+            continue
+        remove_dir_if_exists(extra_stage_root)
+        removed_ids.append(layout_id)
+
+    removed_ids = sorted(set(removed_ids))
+    return completed_ids, completed_roots, removed_ids
+
+
+def load_layout_manifest_map(path: Path) -> dict[int, LayoutSpec]:
+    if not path.exists():
+        return {}
+    grouped_rows: dict[int, list[dict[str, str]]] = {}
+    with path.open(newline="") as file:
+        for row in csv.DictReader(file):
+            layout_id = int(row["layout_id"])
+            grouped_rows.setdefault(layout_id, []).append(row)
+
+    layout_specs: dict[int, LayoutSpec] = {}
+    for layout_id, rows in grouped_rows.items():
+        if not rows:
+            continue
+        sample_row = rows[0]
+        robot_state_keys = sorted(
+            (key for key in sample_row if key.startswith("robot_initial_state_deg_")),
+            key=lambda key: int(key.rsplit("_", 1)[1]),
+        )
+        layout_specs[layout_id] = LayoutSpec(
+            layout_id=layout_id,
+            layout_seed=int(sample_row["layout_seed"]),
+            spatial_candidate_index=int(sample_row.get("spatial_candidate_index", 0)),
+            tcp_tilt_deg=float(sample_row["tcp_tilt_deg"]),
+            initial_tilt_deg=float(sample_row.get("initial_tilt_deg", sample_row["tcp_tilt_deg"])),
+            tilt_attempt_count=int(sample_row.get("tilt_attempt_count", 1)),
+            red_pose=CubePose(
+                x=float(sample_row["red_x"]),
+                y=float(sample_row["red_y"]),
+                z=float(sample_row["red_z"]),
+                qw=float(sample_row["red_qw"]),
+                qx=float(sample_row["red_qx"]),
+                qy=float(sample_row["red_qy"]),
+                qz=float(sample_row["red_qz"]),
+            ),
+            blue_pose=CubePose(
+                x=float(sample_row["blue_x"]),
+                y=float(sample_row["blue_y"]),
+                z=float(sample_row["blue_z"]),
+                qw=float(sample_row["blue_qw"]),
+                qx=float(sample_row["blue_qx"]),
+                qy=float(sample_row["blue_qy"]),
+                qz=float(sample_row["blue_qz"]),
+            ),
+            yellow_pose=CubePose(
+                x=float(sample_row["yellow_x"]),
+                y=float(sample_row["yellow_y"]),
+                z=float(sample_row["yellow_z"]),
+                qw=float(sample_row["yellow_qw"]),
+                qx=float(sample_row["yellow_qx"]),
+                qy=float(sample_row["yellow_qy"]),
+                qz=float(sample_row["yellow_qz"]),
+            ),
+            robot_initial_state_deg=tuple(float(sample_row[key]) for key in robot_state_keys),
+        )
+    return layout_specs
+
+
+def load_triplet_manifest_seed_map(path: Path) -> dict[int, dict[str, str]]:
+    if not path.exists():
+        return {}
+    seed_map: dict[int, dict[str, str]] = {}
+    with path.open(newline="") as file:
+        for row in csv.DictReader(file):
+            seed_map[int(row["layout_id"])] = row
+    return seed_map
+
+
+def restore_layout_spec(
+    scene,
+    *,
+    layout_id: int,
+    stage_root: Path,
+    layout_manifest_map: dict[int, LayoutSpec],
+    triplet_seed_map: dict[int, dict[str, str]],
+) -> LayoutSpec:
+    layout = load_layout_spec_from_stage(stage_root)
+    if layout is not None:
+        return layout
+    if layout_id in layout_manifest_map:
+        return layout_manifest_map[layout_id]
+    if layout_id in triplet_seed_map:
+        manifest_row = triplet_seed_map[layout_id]
+        layout_seed = int(manifest_row["layout_seed"])
+        candidate_index = int(
+            manifest_row.get(
+                "spatial_candidate_index",
+                layout_seed - launcher_args.layout_base_seed - layout_id * launcher_args.max_triplet_attempts,
+            )
+        )
+        tilt_attempt_count = int(manifest_row.get("tilt_attempt_count", 1))
+        tilt_attempt_offset = tilt_attempt_count - 1
+        if not 0 <= candidate_index < launcher_args.max_triplet_attempts:
+            raise RuntimeError(
+                f"Cannot restore layout_id={layout_id}: derived candidate_index={candidate_index} from triplet manifest seed={layout_seed}."
+            )
+        return sample_layout(scene, layout_id, candidate_index=candidate_index, tilt_attempt_offset=tilt_attempt_offset)
+    raise RuntimeError(
+        f"Cannot restore layout_id={layout_id} from staging at {stage_root}. "
+        f"Missing {LAYOUT_SPEC_FILENAME}, {launcher_args.layout_manifest_name}, and usable {launcher_args.triplet_manifest_name}."
+    )
+
+
+def final_dataset_is_complete() -> bool:
+    info_path = FINAL_DATASET_ROOT / "meta" / "info.json"
+    if not info_path.exists():
+        return False
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return int(info.get("total_episodes", -1)) == FINAL_TOTAL_EPISODES
+
+
 def close_preview_viewports(viewports: tuple[object, object] | None) -> None:
     if viewports is None:
         return
@@ -639,7 +925,7 @@ def record_layout_triplet_v2(
     staging_root: Path,
     *,
     candidate_attempt: int,
-) -> tuple[bool, str, Path]:
+) -> tuple[bool, str, Path, str | None]:
     global ACTIVE_COLOR, ACTIVE_LAYOUT, ACTIVE_CANDIDATE_ATTEMPT
     dt = sim.get_physics_dt()
     layout_stage_root = stage_root_for_layout(staging_root, layout.layout_id)
@@ -700,14 +986,14 @@ def record_layout_triplet_v2(
                     print("[TRACE] before_staging_cleanup")
                     shutil.rmtree(layout_stage_root, ignore_errors=True)
                     print("[TRACE] after_staging_cleanup")
-                    return False, controller.failure_reason or "IK failure", layout_stage_root
+                    return False, controller.failure_reason or "IK failure", layout_stage_root, target_color
                 if controller.state != "done":
                     recorder.discard_episode("simulation_stopped")
                     recorder.finalize()
                     print("[TRACE] before_staging_cleanup")
                     shutil.rmtree(layout_stage_root, ignore_errors=True)
                     print("[TRACE] after_staging_cleanup")
-                    return False, "simulation_stopped", layout_stage_root
+                    return False, "simulation_stopped", layout_stage_root, target_color
 
                 success_time = 0.0
                 check_time = 0.0
@@ -732,7 +1018,7 @@ def record_layout_triplet_v2(
                     print("[TRACE] before_staging_cleanup")
                     shutil.rmtree(layout_stage_root, ignore_errors=True)
                     print("[TRACE] after_staging_cleanup")
-                    return False, f"quality_failed:{last_detail}", layout_stage_root
+                    return False, f"quality_failed:{last_detail}", layout_stage_root, target_color
 
                 recorder.record_if_needed(0.0, force=True)
                 recorder.save_episode()
@@ -746,7 +1032,8 @@ def record_layout_triplet_v2(
 
     if recorder is not None:
         recorder.finalize()
-    return True, "success", layout_stage_root
+    write_layout_spec(layout_stage_root, layout)
+    return True, "success", layout_stage_root, None
 
 
 def resolve_staging_root() -> Path:
@@ -767,7 +1054,10 @@ def layout_manifest_rows(layouts: list[LayoutSpec]) -> list[dict[str, object]]:
                     "layout_id": layout.layout_id,
                     "target_color": color,
                     "layout_seed": layout.layout_seed,
+                    "spatial_candidate_index": layout.spatial_candidate_index,
                     "tcp_tilt_deg": layout.tcp_tilt_deg,
+                    "initial_tilt_deg": layout.initial_tilt_deg,
+                    "tilt_attempt_count": layout.tilt_attempt_count,
                     "red_x": layout.red_pose.x,
                     "red_y": layout.red_pose.y,
                     "red_z": layout.red_pose.z,
@@ -812,6 +1102,10 @@ def triplet_manifest_rows(layouts: list[LayoutSpec], stage_roots: list[Path]) ->
             {
                 "layout_id": layout.layout_id,
                 "layout_seed": layout.layout_seed,
+                "spatial_candidate_index": layout.spatial_candidate_index,
+                "initial_tilt_deg": layout.initial_tilt_deg,
+                "accepted_tilt_deg": layout.tcp_tilt_deg,
+                "tilt_attempt_count": layout.tilt_attempt_count,
                 "red_episode": layout.layout_id * 3 + 0,
                 "blue_episode": layout.layout_id * 3 + 1,
                 "yellow_episode": layout.layout_id * 3 + 2,
@@ -833,9 +1127,14 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def aggregate_layout_datasets(stage_roots: list[Path]) -> None:
+def aggregate_layout_datasets(
+    stage_layout_ids: list[int],
+    stage_roots: list[Path],
+    *,
+    allow_replace_existing: bool = False,
+) -> None:
     if FINAL_DATASET_ROOT.exists():
-        if base.args_cli.overwrite_dataset:
+        if base.args_cli.overwrite_dataset or allow_replace_existing:
             shutil.rmtree(FINAL_DATASET_ROOT)
         else:
             raise RuntimeError(
@@ -844,7 +1143,7 @@ def aggregate_layout_datasets(stage_roots: list[Path]) -> None:
             )
 
     aggregate_datasets(
-        repo_ids=[stage_repo_id(layout_id) for layout_id in range(len(stage_roots))],
+        repo_ids=[stage_repo_id(layout_id) for layout_id in stage_layout_ids],
         aggr_repo_id=FINAL_REPO_ID,
         roots=stage_roots,
         aggr_root=FINAL_DATASET_ROOT,
@@ -856,6 +1155,29 @@ def aggregate_layout_datasets(stage_roots: list[Path]) -> None:
 
 def main() -> None:
     global WORKSPACE_AUDIT_LOGGER
+    if launcher_args.resume and base.args_cli.overwrite_dataset:
+        raise SystemExit("--resume and --overwrite_dataset cannot be used together")
+
+    staging_root = resolve_staging_root()
+    restored_layout_ids: list[int] = []
+    restored_stage_roots: list[Path] = []
+    removed_incomplete: list[int] = []
+    if launcher_args.resume:
+        restored_layout_ids, restored_stage_roots, removed_incomplete = scan_resume_staging(staging_root)
+        next_layout_id = len(restored_layout_ids)
+        remaining = max(0, launcher_args.num_layouts - next_layout_id)
+        print(f"[RESUME] staging_root={staging_root}")
+        print(f"[RESUME] completed_layouts={len(restored_layout_ids)}")
+        print(f"[RESUME] completed_ids={restored_layout_ids}")
+        print(f"[RESUME] removed_incomplete={removed_incomplete}")
+        print(f"[RESUME] next_layout_id={next_layout_id}")
+        print(f"[RESUME] remaining={remaining}")
+        if final_dataset_is_complete():
+            print(f"[RESULT] dataset_root={FINAL_DATASET_ROOT}")
+            print(f"[RESULT] repo_id={FINAL_REPO_ID}")
+            print(f"[RESULT] already_complete_layouts={launcher_args.num_layouts}")
+            return
+
     if launcher_args.workspace_audit_csv is not None:
         WORKSPACE_AUDIT_LOGGER = WorkspaceAuditLogger(Path(launcher_args.workspace_audit_csv).expanduser().resolve())
     show_viewports = launcher_args.show_viewports
@@ -885,37 +1207,74 @@ def main() -> None:
         f"y={base.args_cli.cube_y_range or DEFAULT_Y_RANGE}, min_separation={launcher_args.cube_min_separation:.3f} m"
     )
     print(
-        f"[INFO] Tilt range reused per layout: "
-        f"[{DEFAULT_TILT_DEG_RANGE[0]:.2f}, {DEFAULT_TILT_DEG_RANGE[1]:.2f}] deg"
+        f"[INFO] Tilt grid reused per layout: "
+        f"{list(DEFAULT_TILT_DEG_GRID)} deg"
     )
-
-    staging_root = resolve_staging_root()
-    ensure_clean_dir(staging_root)
+    if launcher_args.resume:
+        layout_manifest_map = load_layout_manifest_map(FINAL_DATASET_ROOT / launcher_args.layout_manifest_name)
+        triplet_seed_map = load_triplet_manifest_seed_map(FINAL_DATASET_ROOT / launcher_args.triplet_manifest_name)
+    else:
+        layout_manifest_map = {}
+        triplet_seed_map = {}
+        ensure_clean_dir(staging_root)
 
     try:
-        successful_layouts: list[LayoutSpec] = []
-        successful_stage_roots: list[Path] = []
-        for layout_id in range(launcher_args.num_layouts):
+        successful_layouts: list[LayoutSpec] = [
+            restore_layout_spec(
+                scene,
+                layout_id=layout_id,
+                stage_root=stage_root,
+                layout_manifest_map=layout_manifest_map,
+                triplet_seed_map=triplet_seed_map,
+            )
+            for layout_id, stage_root in zip(restored_layout_ids, restored_stage_roots, strict=True)
+        ]
+        successful_stage_roots: list[Path] = list(restored_stage_roots)
+        successful_layout_ids: list[int] = list(restored_layout_ids)
+        start_layout_id = len(restored_layout_ids)
+        for layout_id in range(start_layout_id, launcher_args.num_layouts):
             success = False
-            for attempt in range(1, launcher_args.max_triplet_attempts + 1):
-                layout = sample_layout(scene, layout_id, candidate_index=attempt - 1)
-                print(
-                    f"\n[TRIPLET] layout_id={layout_id:03d} attempt={attempt} "
-                    f"seed={layout.layout_seed} tilt={layout.tcp_tilt_deg:.2f}"
-                )
-                ok, reason, stage_root = record_layout_triplet_v2(
-                    sim,
-                    scene,
-                    layout,
-                    staging_root,
-                    candidate_attempt=attempt,
-                )
-                if ok:
-                    successful_layouts.append(layout)
-                    successful_stage_roots.append(stage_root)
-                    success = True
+            for spatial_candidate_index in range(launcher_args.max_triplet_attempts):
+                initial_layout = sample_layout(scene, layout_id, candidate_index=spatial_candidate_index, tilt_attempt_offset=0)
+                initial_tilt_index = DEFAULT_TILT_DEG_GRID.index(initial_layout.initial_tilt_deg)
+                print(f"\n[LAYOUT {layout_id:03d}] spatial_candidate={spatial_candidate_index}")
+                print(f"[LAYOUT {layout_id:03d}] initial_tilt={initial_layout.initial_tilt_deg:.1f}")
+                for tilt_attempt_offset, tilt_index in enumerate(range(initial_tilt_index, len(DEFAULT_TILT_DEG_GRID))):
+                    layout = sample_layout(
+                        scene,
+                        layout_id,
+                        candidate_index=spatial_candidate_index,
+                        tilt_attempt_offset=tilt_attempt_offset,
+                    )
+                    print(
+                        f"[LAYOUT {layout_id:03d}] spatial_candidate={spatial_candidate_index} "
+                        f"tilt_attempt={tilt_attempt_offset} tilt={layout.tcp_tilt_deg:.1f}"
+                    )
+                    ok, reason, stage_root, failed_color = record_layout_triplet_v2(
+                        sim,
+                        scene,
+                        layout,
+                        staging_root,
+                        candidate_attempt=spatial_candidate_index + 1,
+                    )
+                    if ok:
+                        successful_layouts.append(layout)
+                        successful_stage_roots.append(stage_root)
+                        successful_layout_ids.append(layout_id)
+                        success = True
+                        print(
+                            f"[LAYOUT {layout_id:03d}] ACCEPT "
+                            f"accepted_tilt={layout.tcp_tilt_deg:.1f}"
+                        )
+                        break
+                    print(
+                        f"[LAYOUT {layout_id:03d}] FAIL "
+                        f"color={failed_color or 'unknown'} reason={reason}"
+                    )
+                if success:
                     break
-                print(f"[TRIPLET][RETRY] layout_id={layout_id:03d} reason={reason}")
+                print(f"[LAYOUT {layout_id:03d}] spatial_candidate={spatial_candidate_index} exhausted tilt grid")
+                print(f"[LAYOUT {layout_id:03d}] resampling spatial layout")
             print("[TRACE] leaving_attempt_loop")
             if not success:
                 print("[TRACE] layout_exhausted")
@@ -933,14 +1292,18 @@ def main() -> None:
                 print(f"[RESULT] workspace_audit candidate complete layout_id={layout_id:03d}")
 
         if WORKSPACE_AUDIT_MODE:
-            if not launcher_args.keep_staging:
+            if not launcher_args.keep_staging and not launcher_args.resume:
                 shutil.rmtree(staging_root, ignore_errors=True)
         else:
-            aggregate_layout_datasets(successful_stage_roots)
+            aggregate_layout_datasets(
+                successful_layout_ids,
+                successful_stage_roots,
+                allow_replace_existing=launcher_args.resume,
+            )
             write_csv(FINAL_DATASET_ROOT / launcher_args.layout_manifest_name, layout_manifest_rows(successful_layouts))
             write_csv(FINAL_DATASET_ROOT / launcher_args.triplet_manifest_name, triplet_manifest_rows(successful_layouts, successful_stage_roots))
 
-            if not launcher_args.keep_staging:
+            if not launcher_args.keep_staging and not launcher_args.resume:
                 shutil.rmtree(staging_root, ignore_errors=True)
 
             print(f"[RESULT] dataset_root={FINAL_DATASET_ROOT}")
