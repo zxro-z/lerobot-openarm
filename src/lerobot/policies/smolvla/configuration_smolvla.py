@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
@@ -109,6 +110,16 @@ class SmolVLAConfig(PreTrainedConfig):
     compile_model: bool = False  # Whether to use torch.compile for model optimization
     compile_mode: str = "max-autotune"  # Torch compile mode
 
+    early_target_weight: float = 1.0
+    early_target_start: int = 36
+    early_target_end: int = 100
+
+    counterfactual_lambda: float = 0.0
+    counterfactual_chunk_start: int = 0
+    counterfactual_chunk_end: int = 16
+    counterfactual_triplets_per_batch: int = 0
+    counterfactual_triplet_manifest: str | Path | None = None
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -121,6 +132,31 @@ class SmolVLAConfig(PreTrainedConfig):
         if self.use_delta_joint_actions_aloha:
             raise NotImplementedError(
                 "`use_delta_joint_actions_aloha` is used by smolvla for aloha real models. It is not ported yet in LeRobot."
+            )
+        if self.early_target_weight < 1.0:
+            raise ValueError(f"early_target_weight must be >= 1.0, got {self.early_target_weight}")
+        if self.early_target_end < self.early_target_start:
+            raise ValueError(
+                f"early_target_end must be >= early_target_start, got {self.early_target_start}>{self.early_target_end}"
+            )
+        if self.counterfactual_lambda < 0.0:
+            raise ValueError(f"counterfactual_lambda must be >= 0.0, got {self.counterfactual_lambda}")
+        if self.counterfactual_triplets_per_batch < 0:
+            raise ValueError(
+                f"counterfactual_triplets_per_batch must be >= 0, got {self.counterfactual_triplets_per_batch}"
+            )
+        if self.counterfactual_chunk_start < 0:
+            raise ValueError(
+                f"counterfactual_chunk_start must be >= 0, got {self.counterfactual_chunk_start}"
+            )
+        if self.counterfactual_chunk_end <= self.counterfactual_chunk_start:
+            raise ValueError(
+                "counterfactual_chunk_end must be greater than counterfactual_chunk_start, "
+                f"got {self.counterfactual_chunk_start}, {self.counterfactual_chunk_end}"
+            )
+        if self.counterfactual_chunk_end > self.chunk_size:
+            raise ValueError(
+                f"counterfactual_chunk_end must be <= chunk_size={self.chunk_size}, got {self.counterfactual_chunk_end}"
             )
 
     def validate_features(self) -> None:

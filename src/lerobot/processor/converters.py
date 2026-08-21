@@ -166,14 +166,15 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
     Returns:
         A dictionary with the extracted complementary data.
     """
-    pad_keys = {k: v for k, v in batch.items() if "_is_pad" in k}
-    task_key = {"task": batch["task"]} if "task" in batch else {}
-    subtask_key = {"subtask": batch["subtask"]} if "subtask" in batch else {}
-    index_key = {"index": batch["index"]} if "index" in batch else {}
-    task_index_key = {"task_index": batch["task_index"]} if "task_index" in batch else {}
-    episode_index_key = {"episode_index": batch["episode_index"]} if "episode_index" in batch else {}
-
-    return {**pad_keys, **task_key, **subtask_key, **index_key, **task_index_key, **episode_index_key}
+    reserved_top_level_keys = {ACTION, REWARD, DONE, TRUNCATED, INFO}
+    complementary_data = {}
+    for key, value in batch.items():
+        if key in reserved_top_level_keys:
+            continue
+        if key.startswith(OBS_PREFIX):
+            continue
+        complementary_data[key] = value
+    return complementary_data
 
 
 def create_transition(

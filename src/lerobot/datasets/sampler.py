@@ -23,6 +23,66 @@ import pandas as pd
 import torch
 
 
+class TripletAwareBatchSampler(torch.utils.data.Sampler[list[int]]):
+    def __init__(
+        self,
+        *,
+        base_sampler,
+        triplet_frame_indices: list[tuple[int, int, int]],
+        batch_size: int,
+        triplets_per_batch: int = 1,
+        shuffle: bool = True,
+    ):
+        if batch_size < 3:
+            raise ValueError(f"batch_size must be >= 3 for triplet-aware batching, got {batch_size}")
+        if triplets_per_batch < 1:
+            raise ValueError(f"triplets_per_batch must be >= 1, got {triplets_per_batch}")
+        if triplets_per_batch * 3 > batch_size:
+            raise ValueError(
+                f"triplets_per_batch={triplets_per_batch} exceeds batch capacity for batch_size={batch_size}"
+            )
+        if len(triplet_frame_indices) == 0:
+            raise ValueError("triplet_frame_indices must not be empty")
+
+        self.base_sampler = base_sampler
+        self.triplet_frame_indices = triplet_frame_indices
+        self.batch_size = batch_size
+        self.triplets_per_batch = triplets_per_batch
+        self.shuffle = shuffle
+
+    def __len__(self) -> int:
+        return max(1, len(self.base_sampler) // self.batch_size)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        base_indices = list(iter(self.base_sampler))
+        if len(base_indices) == 0:
+            return
+
+        triplet_order = torch.arange(len(self.triplet_frame_indices))
+        if self.shuffle:
+            triplet_order = triplet_order[torch.randperm(len(triplet_order))]
+
+        base_ptr = 0
+        triplet_ptr = 0
+        for _ in range(len(self)):
+            batch: list[int] = []
+
+            for _ in range(self.triplets_per_batch):
+                triplet = self.triplet_frame_indices[int(triplet_order[triplet_ptr % len(triplet_order)])]
+                batch.extend(int(idx) for idx in triplet)
+                triplet_ptr += 1
+
+            while len(batch) < self.batch_size:
+                batch.append(int(base_indices[base_ptr % len(base_indices)]))
+                base_ptr += 1
+
+            if self.shuffle:
+                permutation = torch.randperm(len(batch)).tolist()
+                batch = [batch[i] for i in permutation]
+
+            yield batch
+
+
 def build_episode_indices(
     dataset_from_indices: list[int],
     dataset_to_indices: list[int],

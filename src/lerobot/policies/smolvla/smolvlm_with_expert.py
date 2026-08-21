@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import os
 
 import torch
 from torch import nn
@@ -73,18 +74,20 @@ class SmolVLMWithExpertModel(nn.Module):
         device: str = "auto",
     ):
         super().__init__()
+        local_files_only = os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
         if load_vlm_weights:
             print(f"Loading  {model_id} weights ...")
             self.vlm = AutoModelForImageTextToText.from_pretrained(
                 model_id,
                 torch_dtype="bfloat16",
                 low_cpu_mem_usage=True,
+                local_files_only=local_files_only,
             )
             config = self.vlm.config
         else:
-            config = AutoConfig.from_pretrained(model_id)
+            config = AutoConfig.from_pretrained(model_id, local_files_only=local_files_only)
             self.vlm = SmolVLMForConditionalGeneration(config=config)
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(model_id, local_files_only=local_files_only)
         if num_vlm_layers > 0:
             print(f"Reducing the number of VLM layers to {num_vlm_layers} ...")
             self.get_vlm_model().text_model.layers = self.get_vlm_model().text_model.layers[:num_vlm_layers]

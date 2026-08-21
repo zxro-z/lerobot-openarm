@@ -28,8 +28,10 @@ from tqdm import tqdm
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.datasets.counterfactual import CounterfactualMetadataDataset, load_counterfactual_triplet_metadata
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import (
+    TripletAwareBatchSampler,
     build_combined_oversampling_sampler,
     EpisodeAwareSampler,
     build_grasp_oversampling_sampler,
@@ -113,6 +115,9 @@ def update_policy(
             # rabc_batch_weights is already normalized to sum to batch_size
             epsilon = 1e-6
             loss = (per_sample_loss * rabc_batch_weights).sum() / (rabc_batch_weights.sum() + epsilon)
+            aux_loss = output_dict.pop("_aux_loss", None)
+            if aux_loss is not None:
+                loss = loss + aux_loss
             # Log raw mean weight (before normalization) - this is the meaningful metric
             output_dict["rabc_mean_weight"] = rabc_batch_stats["raw_mean_weight"]
             output_dict["rabc_num_zero_weight"] = rabc_batch_stats["num_zero_weight"]
@@ -400,6 +405,28 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     episode_indices_to_use = dataset.episodes if getattr(dataset, "episodes", None) is not None else None
     drop_n_first_frames = 0
     drop_n_last_frames = getattr(cfg.policy, "drop_n_last_frames", 0) if hasattr(cfg.policy, "drop_n_last_frames") else 0
+    use_counterfactual_triplets = bool(
+        getattr(cfg.policy, "counterfactual_lambda", 0.0) > 0.0
+        or getattr(cfg.policy, "counterfactual_triplets_per_batch", 0) > 0
+    )
+    counterfactual_metadata = None
+    if use_counterfactual_triplets:
+        counterfactual_metadata = load_counterfactual_triplet_metadata(
+            dataset=dataset,
+            manifest_path=getattr(cfg.policy, "counterfactual_triplet_manifest", None),
+            drop_n_first_frames=drop_n_first_frames,
+            drop_n_last_frames=drop_n_last_frames,
+            episode_indices_to_use=episode_indices_to_use,
+        )
+        dataset = CounterfactualMetadataDataset(dataset, counterfactual_metadata)
+        if is_main_process:
+            summary = counterfactual_metadata.summary
+            logging.info("[COUNTERFACTUAL TRIPLETS]")
+            logging.info("manifest = %s", summary.manifest_path)
+            logging.info("triplets = %s", summary.triplet_count)
+            logging.info("triplet frames = %s", summary.triplet_frame_count)
+            logging.info("covered episodes = %s", summary.covered_episode_count)
+            logging.info("triplet frame span min/max = %s/%s", summary.min_triplet_frames, summary.max_triplet_frames)
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
@@ -518,16 +545,43 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info("[TARGET COMMITMENT OVERSAMPLING]")
         logging.info("enabled = false")
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        num_workers=cfg.num_workers,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle and not cfg.dataset.streaming,
-        sampler=sampler,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        prefetch_factor=2 if cfg.num_workers > 0 else None,
-    )
+    dataloader_kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "num_workers": cfg.num_workers,
+        "pin_memory": device.type == "cuda",
+        "drop_last": False,
+        "prefetch_factor": 2 if cfg.num_workers > 0 else None,
+    }
+    triplets_per_batch = getattr(cfg.policy, "counterfactual_triplets_per_batch", 0)
+    if triplets_per_batch > 0:
+        if counterfactual_metadata is None:
+            raise ValueError("counterfactual_triplets_per_batch requires counterfactual triplet metadata")
+        if sampler is not None:
+            base_sampler = sampler
+        elif cfg.dataset.streaming:
+            base_sampler = torch.utils.data.SequentialSampler(dataset)
+        else:
+            base_sampler = torch.utils.data.RandomSampler(dataset)
+        dataloader_kwargs["batch_sampler"] = TripletAwareBatchSampler(
+            base_sampler=base_sampler,
+            triplet_frame_indices=counterfactual_metadata.triplet_frame_indices,
+            batch_size=cfg.batch_size,
+            triplets_per_batch=triplets_per_batch,
+            shuffle=not cfg.dataset.streaming,
+        )
+        if is_main_process:
+            logging.info("[TRIPLET-AWARE BATCHING]")
+            logging.info("enabled = true")
+            logging.info("triplets_per_batch = %s", triplets_per_batch)
+    else:
+        dataloader_kwargs["batch_size"] = cfg.batch_size
+        dataloader_kwargs["shuffle"] = shuffle and not cfg.dataset.streaming
+        dataloader_kwargs["sampler"] = sampler
+        if is_main_process:
+            logging.info("[TRIPLET-AWARE BATCHING]")
+            logging.info("enabled = false")
+
+    dataloader = torch.utils.data.DataLoader(**dataloader_kwargs)
 
     # Prepare everything with accelerator
     accelerator.wait_for_everyone()

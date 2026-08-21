@@ -71,6 +71,9 @@ from lerobot.policies.utils import (
 from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE
 from lerobot.utils.utils import get_safe_dtype
 
+COUNTERFACTUAL_TRIPLET_KEY = "counterfactual_triplet_id"
+COUNTERFACTUAL_COLOR_KEY = "counterfactual_color_id"
+
 
 class ActionSelectKwargs(TypedDict, total=False):
     inference_delay: int | None
@@ -377,7 +380,11 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        forward_out = self.model.forward(
+            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time, return_outputs=True
+        )
+        losses = forward_out["losses"]
+        pred_actions = forward_out["pred_actions"]
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
 
         if actions_is_pad is not None:
@@ -385,20 +392,111 @@ class SmolVLAPolicy(PreTrainedPolicy):
             losses = losses * in_episode_bound.unsqueeze(-1)
             loss_dict["losses_after_in_ep_bound"] = losses.clone().mean().item()
 
+        original_action_dim = self.config.action_feature.shape[0]
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
+        pred_actions = pred_actions[:, :, :original_action_dim]
+        actions = actions[:, :, :original_action_dim]
         loss_dict["losses_after_rm_padding"] = losses.clone().mean().item()
+
+        losses = self._apply_early_target_weight(batch, losses)
+        loss_dict["losses_after_early_weight"] = losses.clone().mean().item()
+        aux_loss, aux_metrics = self._compute_counterfactual_loss(batch, pred_actions, actions)
+        loss_dict.update(aux_metrics)
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
             per_sample_loss = losses.mean(dim=(1, 2))
-            loss_dict["loss"] = per_sample_loss.mean().item()
+            loss_dict["base_loss"] = per_sample_loss.mean().item()
+            loss_dict["loss"] = (per_sample_loss.mean() + aux_loss).item()
+            loss_dict["_aux_loss"] = aux_loss
             return per_sample_loss, loss_dict
         else:
             # Default: return scalar mean loss
-            loss = losses.mean()
+            base_loss = losses.mean()
+            loss = base_loss + aux_loss
+            loss_dict["base_loss"] = base_loss.item()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
+
+    def _apply_early_target_weight(self, batch: dict[str, Tensor], losses: Tensor) -> Tensor:
+        if self.config.early_target_weight <= 1.0:
+            return losses
+        frame_index = batch.get("frame_index")
+        if frame_index is None:
+            return losses
+        if frame_index.ndim > 1:
+            frame_index = frame_index[:, -1]
+        mask = (frame_index >= self.config.early_target_start) & (frame_index <= self.config.early_target_end)
+        sample_weights = torch.ones(losses.shape[0], device=losses.device, dtype=losses.dtype)
+        sample_weights[mask] = self.config.early_target_weight
+        return losses * sample_weights[:, None, None]
+
+    def _compute_counterfactual_loss(
+        self, batch: dict[str, Tensor], pred_actions: Tensor, gt_actions: Tensor
+    ) -> tuple[Tensor, dict[str, float]]:
+        zero = pred_actions.new_zeros(())
+        metrics = {
+            "counterfactual_loss": 0.0,
+            "counterfactual_triplets_in_batch": 0.0,
+            "counterfactual_pred_separation": 0.0,
+            "counterfactual_gt_separation": 0.0,
+            "counterfactual_sep_ratio": 0.0,
+        }
+        if self.config.counterfactual_lambda <= 0.0:
+            return zero, metrics
+
+        triplet_ids = batch.get(COUNTERFACTUAL_TRIPLET_KEY)
+        color_ids = batch.get(COUNTERFACTUAL_COLOR_KEY)
+        if triplet_ids is None or color_ids is None:
+            return zero, metrics
+
+        chunk = slice(self.config.counterfactual_chunk_start, self.config.counterfactual_chunk_end)
+        pred_chunk = pred_actions[:, chunk, :].reshape(pred_actions.shape[0], -1)
+        gt_chunk = gt_actions[:, chunk, :].reshape(gt_actions.shape[0], -1)
+
+        unique_triplets = torch.unique(triplet_ids)
+        pair_losses: list[Tensor] = []
+        pred_separations: list[Tensor] = []
+        gt_separations: list[Tensor] = []
+        triplet_count = 0
+        for triplet_id in unique_triplets.tolist():
+            if triplet_id < 0:
+                continue
+            members = triplet_ids == triplet_id
+            member_indices = torch.nonzero(members, as_tuple=False).flatten()
+            if member_indices.numel() < 3:
+                continue
+
+            by_color: dict[int, int] = {}
+            for batch_index in member_indices.tolist():
+                color_id = int(color_ids[batch_index].item())
+                if color_id >= 0 and color_id not in by_color:
+                    by_color[color_id] = batch_index
+            if tuple(sorted(by_color)) != (0, 1, 2):
+                continue
+
+            ordered = [by_color[0], by_color[1], by_color[2]]
+            triplet_count += 1
+            for left, right in ((0, 1), (0, 2), (1, 2)):
+                pred_delta = pred_chunk[ordered[left]] - pred_chunk[ordered[right]]
+                gt_delta = (gt_chunk[ordered[left]] - gt_chunk[ordered[right]]).detach()
+                pair_losses.append(F.mse_loss(pred_delta, gt_delta))
+                pred_separations.append(torch.norm(pred_delta, p=2))
+                gt_separations.append(torch.norm(gt_delta, p=2))
+
+        if not pair_losses:
+            return zero, metrics
+
+        cf_loss = torch.stack(pair_losses).mean()
+        pred_sep = torch.stack(pred_separations).mean()
+        gt_sep = torch.stack(gt_separations).mean()
+        metrics["counterfactual_loss"] = cf_loss.item()
+        metrics["counterfactual_triplets_in_batch"] = float(triplet_count)
+        metrics["counterfactual_pred_separation"] = pred_sep.item()
+        metrics["counterfactual_gt_separation"] = gt_sep.item()
+        metrics["counterfactual_sep_ratio"] = (pred_sep / gt_sep.clamp_min(1e-6)).item()
+        return self.config.counterfactual_lambda * cf_loss, metrics
 
     def prepare_images(self, batch):
         """Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
@@ -602,6 +700,22 @@ class VLAFlowMatching(nn.Module):
     def _rtc_enabled(self):
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
+    def _normalize_suffix_output(self, suffix_out: Tensor, expected_len: int) -> Tensor:
+        if suffix_out.ndim == 2:
+            suffix_out = suffix_out[:, None, :].expand(-1, expected_len, -1)
+        elif suffix_out.ndim != 3:
+            raise ValueError(f"Expected suffix_out to be 2D or 3D, got shape={tuple(suffix_out.shape)}")
+        if suffix_out.shape[1] > expected_len:
+            suffix_out = suffix_out[:, -expected_len:]
+        elif suffix_out.shape[1] < expected_len:
+            if suffix_out.shape[1] == 1:
+                suffix_out = suffix_out.expand(-1, expected_len, -1)
+            else:
+                raise ValueError(
+                    f"suffix_out sequence length {suffix_out.shape[1]} does not match expected_len={expected_len}"
+                )
+        return suffix_out
+
     def set_requires_grad(self):
         for params in self.state_proj.parameters():
             params.requires_grad = self.config.train_state_proj
@@ -751,8 +865,9 @@ class VLAFlowMatching(nn.Module):
         action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
         pad_masks.append(action_time_mask)
 
-        # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] * self.config.chunk_size
+        # Match the actual suffix sequence length instead of assuming config.chunk_size.
+        # Some datasets provide fewer action targets than the configured chunk size.
+        att_masks += [1] * action_time_dim
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
@@ -760,8 +875,17 @@ class VLAFlowMatching(nn.Module):
         return embs, pad_masks, att_masks
 
     def forward(
-        self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
-    ) -> Tensor:
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        actions,
+        noise=None,
+        time=None,
+        return_outputs: bool = False,
+    ) -> Tensor | dict[str, Tensor]:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -790,11 +914,15 @@ class VLAFlowMatching(nn.Module):
             use_cache=False,
             fill_kv_cache=False,
         )
-        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        expected_len = actions.shape[1]
+        suffix_out = self._normalize_suffix_output(suffix_out, expected_len)
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
+        if return_outputs:
+            pred_actions = noise - v_t
+            return {"losses": losses, "pred_actions": pred_actions}
         return losses
 
     def sample_actions(
@@ -898,7 +1026,8 @@ class VLAFlowMatching(nn.Module):
             fill_kv_cache=False,
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        expected_len = x_t.shape[1]
+        suffix_out = self._normalize_suffix_output(suffix_out, expected_len)
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         return v_t
