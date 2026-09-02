@@ -167,6 +167,17 @@ wandb/
 data/
 outputs/
 
+# External simulation artifacts: preserve generation/evaluation source code,
+# but never add the final dataset payload or its collection position logs.
+src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_dataset/
+src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_cube_positions/
+
+# Local Hugging Face caches created by experiments.
+.hf_cache/
+.hf_datasets_cache/
+.hf_home/
+.hf_models/
+
 # Translations
 *.mo
 *.pot

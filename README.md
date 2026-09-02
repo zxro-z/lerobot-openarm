@@ -1,159 +1,308 @@
-<p align="center">
-  <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
-</p>
+# SmolVLA Simulation Final Archive
 
-<div align="center">
+This archive records only the final simulation experiments. It intentionally
+excludes real-robot experiments, staging data, smoke tests, failed runs, and
+intermediate analyses. Dataset, checkpoint, and video binaries are external
+artifacts and must not be committed to Git.
 
-[![Tests](https://github.com/huggingface/lerobot/actions/workflows/nightly.yml/badge.svg?branch=main)](https://github.com/huggingface/lerobot/actions/workflows/nightly.yml?query=branch%3Amain)
-[![Python versions](https://img.shields.io/pypi/pyversions/lerobot)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/huggingface/lerobot/blob/main/LICENSE)
-[![Status](https://img.shields.io/pypi/status/lerobot)](https://pypi.org/project/lerobot/)
-[![Version](https://img.shields.io/pypi/v/lerobot)](https://pypi.org/project/lerobot/)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v2.1-ff69b4.svg)](https://github.com/huggingface/lerobot/blob/main/CODE_OF_CONDUCT.md)
-[![Discord](https://img.shields.io/badge/Discord-Join_Us-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/q8Dzzpym3f)
+## 1. Overview
 
-</div>
+Two final simulation results are retained:
 
-**LeRobot** aims to provide models, datasets, and tools for real-world robotics in PyTorch. The goal is to lower the barrier to entry so that everyone can contribute to and benefit from shared datasets and pretrained models.
+1. Single-cube pick-and-place baseline: **9/10 success (90.0%)**.
+2. Three-color, language-conditioned pick-and-place: the final checkpoint is
+   **018000**, selected from the 10k/14k/18k/20k comparison.
 
-🤗 A hardware-agnostic, Python-native interface that standardizes control across diverse platforms, from low-cost arms (SO-100) to humanoids.
+## 2. Final Experiments
 
-🤗 A standardized, scalable LeRobotDataset format (Parquet + MP4 or images) hosted on the Hugging Face Hub, enabling efficient storage, streaming and visualization of massive robotic datasets.
+### 2.1 Single-cube Pick-and-Place
 
-🤗 State-of-the-art policies that have been shown to transfer to the real-world ready for training and deployment.
+Task: pick one cube and place it at the target/storage location.
 
-🤗 Comprehensive support for the open-source ecosystem to democratize physical AI.
+| Metric | Result |
+| --- | ---: |
+| Successes | 9 / 10 |
+| Task Success | 90.0% |
 
-## Quick Start
+TODO: verify the exact final single-cube checkpoint, evaluation command, and
+video archive path. No matching final-result artifact was found during this
+archive pass, so no intermediate single-cube run is named as canonical.
 
-LeRobot can be installed directly from PyPI.
+### 2.2 Three-color Language-conditioned Pick-and-Place
 
-```bash
-pip install lerobot
-lerobot-info
+Three cubes (red, blue, yellow) are present. The instruction selects the cube
+to move into the storage box. The final result evaluates both manipulation and
+instruction-conditioned color selection.
+
+## 3. Dataset
+
+### Dataset path
+
+External archive path (not tracked by Git):
+
+```text
+/home/zxro/arena/lerobot/src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_dataset
 ```
 
-> [!IMPORTANT]
-> For detailed installation guide, please see the [Installation Documentation](https://huggingface.co/docs/lerobot/installation).
+LeRobot repo ID: `local/openarm_three_color_triplet_tilt50_matte`.
 
-## Robots & Control
+### Dataset composition
 
-<div align="center">
-  <img src="./media/readme/robots_control_video.webp" width="640px" alt="Reachy 2 Demo">
-</div>
+| Item | Verified value |
+| --- | --- |
+| Episodes | 150 |
+| Frames | 77,160 |
+| Tasks | 3 |
+| Per color | 50 red / 50 blue / 50 yellow |
+| FPS | 30 |
+| Cube world X range observed in position log | -0.589884 to -0.470105 m |
+| Cube world Y range observed in position log | 0.010078 to 0.139903 m |
+| Cube material | saturated matte, non-emissive, roughness 1.0 |
+| Gripper angle | 50 degrees fixed (experiment contract) |
 
-LeRobot provides a unified `Robot` class interface that decouples control logic from hardware specifics. It supports a wide range of robots and teleoperation devices.
+### Observation / action features
 
-```python
-from lerobot.robots.myrobot import MyRobot
+| Feature | Value |
+| --- | --- |
+| `observation.state` | 8-D: joint_1..joint_7, gripper |
+| `action` | 8-D: joint_1..joint_7, gripper |
+| Cameras | `observation.images.top`, `observation.images.wrist` |
+| Camera format | 640×480 RGB video, 30 FPS |
 
-# Connect to a robot
-robot = MyRobot(config=...)
-robot.connect()
+### Task strings
 
-# Read observation and send action
-obs = robot.get_observation()
-action = model.select_action(obs)
-robot.send_action(action)
+```text
+Pick up the red cube and place it in the storage box.
+Pick up the blue cube and place it in the storage box.
+Pick up the yellow cube and place it in the storage box.
 ```
 
-**Supported Hardware:** SO100, LeKiwi, Koch, HopeJR, OMX, EarthRover, Reachy2, Gamepads, Keyboards, Phones, OpenARM, Unitree G1.
+### Dataset generation rule
 
-While these devices are natively integrated into the LeRobot codebase, the library is designed to be extensible. You can easily implement the Robot interface to utilize LeRobot's data collection, training, and visualization tools for your own custom robot.
+The generator samples one three-cube layout, restores the robot and all cubes
+to that same layout before each target episode, and records the sequence:
 
-For detailed hardware setup guides, see the [Hardware Documentation](https://huggingface.co/docs/lerobot/integrate_hardware).
-
-## LeRobot Dataset
-
-To solve the data fragmentation problem in robotics, we utilize the **LeRobotDataset** format.
-
-- **Structure:** Synchronized MP4 videos (or images) for vision and Parquet files for state/action data.
-- **HF Hub Integration:** Explore thousands of robotics datasets on the [Hugging Face Hub](https://huggingface.co/lerobot).
-- **Tools:** Seamlessly delete episodes, split by indices/fractions, add/remove features, and merge multiple datasets.
-
-```python
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-# Load a dataset from the Hub
-dataset = LeRobotDataset("lerobot/aloha_mobile_cabinet")
-
-# Access data (automatically handles video decoding)
-episode_index=0
-print(f"{dataset[episode_index]['action'].shape=}\n")
+```text
+Red → Blue → Yellow → Red → Blue → Yellow → ...
 ```
 
-Learn more about it in the [LeRobotDataset Documentation](https://huggingface.co/docs/lerobot/lerobot-dataset-v3)
+50 accepted triplets produce 150 episodes. A triplet is accepted atomically:
+if any color episode fails collection quality checks, none of its three episodes
+is merged into the final dataset.
 
-## SoTA Models
+Generation sources:
 
-LeRobot implements state-of-the-art policies in pure PyTorch, covering Imitation Learning, Reinforcement Learning, and Vision-Language-Action (VLA) models, with more coming soon. It also provides you with the tools to instrument and inspect your training process.
+```text
+src/lerobot/scripts/openarm_three_color_triplet_atomic_dataset_with_positions.py
+src/lerobot/scripts/openarm_three_color_triplet_atomic_dataset_with_positions_matte.py
+```
 
-<p align="center">
-  <img alt="Gr00t Architecture" src="./media/readme/VLA_architecture.jpg" width="640px">
-</p>
+## 4. Training
 
-Training a policy is as simple as running a script configuration:
+### Training settings
+
+The values below are from the saved `018000/pretrained_model/train_config.json`
+and policy `config.json`.
+
+| Setting | Final value |
+| --- | --- |
+| Base policy | `lerobot/smolvla_base` |
+| Input/output features | inferred from dataset (resolved to 8-D state/action, top+wrist) |
+| `load_vlm_weights` | true |
+| `train_expert_only` | false |
+| `freeze_vision_encoder` | true |
+| `attention_mode` | `cross_attn` |
+| `train_state_proj` | true |
+| Batch size | 4 |
+| Workers | 4 |
+| Steps | 20,000 |
+| Save frequency | 2,000 |
+| Seed | 1,000 |
+| Grasp sampler | off (`grasp_positive_manifest: null`) |
+| Commitment sampler | off (`target_commitment_manifest: null`) |
+
+`train_expert_only=false` permits training beyond the action expert subject to
+the policy's trainable-parameter rules; `freeze_vision_encoder=true` keeps the
+vision encoder frozen. These are saved resolved policy values, not inferred
+from the result table.
+
+### Full training command
+
+The original shell history is not stored. The following is a **reconstructed,
+executable command from the saved resolved configuration**; option ordering is
+not claimed to be historical.
 
 ```bash
 lerobot-train \
-  --policy=act \
-  --dataset.repo_id=lerobot/aloha_mobile_cabinet
+  --policy.path=lerobot/smolvla_base \
+  --policy.input_features=null \
+  --policy.output_features=null \
+  --policy.load_vlm_weights=true \
+  --policy.train_expert_only=false \
+  --policy.freeze_vision_encoder=true \
+  --policy.attention_mode=cross_attn \
+  --policy.train_state_proj=true \
+  --policy.device=cuda \
+  --policy.use_amp=true \
+  --policy.push_to_hub=false \
+  --dataset.repo_id=local/openarm_three_color_triplet_tilt50_matte \
+  --dataset.root=/home/zxro/arena/lerobot/src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_dataset \
+  --dataset.video_backend=pyav \
+  --output_dir=/home/zxro/arena/lerobot/outputs/train/openarm_three_color_triplet_tilt50_matte_run2_contract \
+  --job_name=openarm_three_color_transit_tilt_50_smolvla \
+  --batch_size=4 \
+  --num_workers=4 \
+  --steps=20000 \
+  --save_freq=2000 \
+  --seed=1000 \
+  --wandb.enable=false
 ```
 
-| Category                   | Models                                                                                                                                                                                                       |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Imitation Learning**     | [ACT](./docs/source/policy_act_README.md), [Diffusion](./docs/source/policy_diffusion_README.md), [VQ-BeT](./docs/source/policy_vqbet_README.md)                                                             |
-| **Reinforcement Learning** | [HIL-SERL](./docs/source/hilserl.mdx), [TDMPC](./docs/source/policy_tdmpc_README.md) & QC-FQL (coming soon)                                                                                                  |
-| **VLAs Models**            | [Pi0Fast](./docs/source/pi0fast.mdx), [Pi0.5](./docs/source/pi05.mdx), [GR00T N1.5](./docs/source/policy_groot_README.md), [SmolVLA](./docs/source/policy_smolvla_README.md), [XVLA](./docs/source/xvla.mdx) |
+TODO: verify whether the original invocation explicitly supplied `--eval_freq`.
+The saved train configuration alone does not establish the original CLI spelling.
 
-Similarly to the hardware, you can easily implement your own policy & leverage LeRobot's data collection, training, and visualization tools, and share your model to the HF Hub
+## 5. Checkpoints
 
-For detailed policy setup guides, see the [Policy Documentation](https://huggingface.co/docs/lerobot/bring_your_own_policies).
+Training output directory (external; Git-ignored):
 
-## Inference & Evaluation
+```text
+/home/zxro/arena/lerobot/outputs/train/openarm_three_color_triplet_tilt50_matte_run2_contract
+```
 
-Evaluate your policies in simulation or on real hardware using the unified evaluation script. LeRobot supports standard benchmarks like **LIBERO**, **MetaWorld** and more to come.
+Checkpoint naming rule: zero-padded step directories, for example
+`checkpoints/018000/pretrained_model`.
+
+**Final / best checkpoint:**
+
+```text
+/home/zxro/arena/lerobot/outputs/train/openarm_three_color_triplet_tilt50_matte_run2_contract/checkpoints/018000/pretrained_model
+```
+
+| Checkpoint | Task Success | Color Accuracy | Wrong-color Success | Precision among Successes |
+| --- | ---: | ---: | ---: | ---: |
+| 10k | 16.7% | 10.0% | 6.7% | 60.0% |
+| 14k | 20.0% | 3.3% | 16.7% | 16.7% |
+| **18k (final)** | **40.0%** | **20.0%** | **20.0%** | **50.0%** |
+| 20k | 20.0% | 6.7% | 13.3% | 33.3% |
+
+Performance did not monotonically improve with training steps. The reason for
+the 20k degradation was not conclusively identified.
+
+## 6. Evaluation
+
+### Protocol
+
+Each checkpoint is evaluated for 30 episodes:
+
+| Instruction | Episodes |
+| --- | ---: |
+| Red | 10 |
+| Blue | 10 |
+| Yellow | 10 |
+| Total | 30 |
+
+The protocol uses a fixed seed schedule beginning at 1000. The evaluator uses
+one deterministic environment reset seed per episode.
+
+Metrics:
+
+- `picked_color`
+- `task_success`
+- `color_correct`
+- instruction-color × picked-color confusion matrix
+
+Interpretation:
+
+- diagonal: selected the instructed color and succeeded;
+- off-diagonal success: manipulation succeeded but selected the wrong color;
+- failure: no task success within the episode limit.
+
+### Full evaluation command
+
+The final results were produced by the top+wrist three-color evaluator:
+`scripts/eval/eval_smolvla.py`. The following command reproduces the stored
+30-episode protocol and writes a new external result CSV.
 
 ```bash
-# Evaluate a policy on the LIBERO benchmark
-lerobot-eval \
-  --policy.path=lerobot/pi0_libero_finetuned \
-  --env.type=libero \
-  --env.task=libero_object \
-  --eval.n_episodes=10
+python scripts/eval/eval_smolvla.py \
+  --policy-path /home/zxro/arena/lerobot/outputs/train/openarm_three_color_triplet_tilt50_matte_run2_contract/checkpoints/018000/pretrained_model \
+  --dataset-root /home/zxro/arena/lerobot/src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_dataset \
+  --dataset-repo-id local/openarm_three_color_triplet_tilt50_matte \
+  --num-episodes-per-color 10 \
+  --max-steps 1000 \
+  --seed 1000 \
+  --device cuda \
+  --instruction-order grouped \
+  --output /home/zxro/arena/lerobot/outputs/eval/openarm_three_color_triplet_tilt50_matte_run2_contract/reproduced_018000_results.csv
 ```
 
-Learn how to implement your own simulation environment or benchmark and distribute it from the HF Hub by following the [EnvHub Documentation](https://huggingface.co/docs/lerobot/envhub)
+Summarize the resulting CSV:
 
-## Resources
-
-- **[Documentation](https://huggingface.co/docs/lerobot/index):** The complete guide to tutorials & API.
-- **[Chinese Tutorials: LeRobot+SO-ARM101中文教程-同济子豪兄](https://zihao-ai.feishu.cn/wiki/space/7589642043471924447)** Detailed doc for assembling, teleoperate, dataset, train, deploy. Verified by Seed Studio and 5 global hackathon players.
-- **[Discord](https://discord.gg/q8Dzzpym3f):** Join the `LeRobot` server to discuss with the community.
-- **[X](https://x.com/LeRobotHF):** Follow us on X to stay up-to-date with the latest developments.
-- **[Robot Learning Tutorial](https://huggingface.co/spaces/lerobot/robot-learning-tutorial):** A free, hands-on course to learn robot learning using LeRobot.
-
-## Citation
-
-If you use LeRobot in your research, please cite:
-
-```bibtex
-@misc{cadene2024lerobot,
-    author = {Cadene, Remi and Alibert, Simon and Soare, Alexander and Gallouedec, Quentin and Zouitine, Adil and Palma, Steven and Kooijmans, Pepijn and Aractingi, Michel and Shukor, Mustafa and Aubakirova, Dana and Russi, Martino and Capuano, Francesco and Pascal, Caroline and Choghari, Jade and Moss, Jess and Wolf, Thomas},
-    title = {LeRobot: State-of-the-art Machine Learning for Real-World Robotics in Pytorch},
-    howpublished = "\url{https://github.com/huggingface/lerobot}",
-    year = {2024}
-}
+```bash
+python scripts/eval/analyze_color_eval.py \
+  /home/zxro/arena/lerobot/outputs/eval/openarm_three_color_triplet_tilt50_matte_run2_contract/reproduced_018000_results.csv
 ```
 
-## Contribute
+TODO: verify whether the historical final invocation used `--use-amp`; the
+stored result CSV does not preserve its CLI arguments.
 
-We welcome contributions from everyone in the community! To get started, please read our [CONTRIBUTING.md](./CONTRIBUTING.md) guide. Whether you're adding a new feature, improving documentation, or fixing a bug, your help and feedback are invaluable. We're incredibly excited about the future of open-source robotics and can't wait to work with you on what's next—thank you for your support!
+## 7. Final Results
 
-<p align="center">
-  <img alt="SO101 Video" src="./media/readme/so100_video.webp" width="640px">
-</p>
+### Single-cube result
 
-<div align="center">
-<sub>Built by the <a href="https://huggingface.co/lerobot">LeRobot</a> team at <a href="https://huggingface.co">Hugging Face</a> with ❤️</sub>
-</div>
+```text
+successes = 9/10
+Task Success = 90.0%
+```
+
+### Three-color result: 018000 (final)
+
+| Instruction | Picked Red | Picked Blue | Picked Yellow | Failure |
+| --- | ---: | ---: | ---: | ---: |
+| Red | 2 | 1 | 1 | 6 |
+| Blue | 1 | 2 | 2 | 5 |
+| Yellow | 0 | 1 | 2 | 7 |
+
+| Metric | Result |
+| --- | --- |
+| Task Success | 12 / 30 = 40.0% |
+| Color Accuracy | 6 / 30 = 20.0% |
+| Wrong-color Success | 6 / 30 = 20.0% |
+| Precision among task successes | 6 / 12 = 50.0% |
+| Red instruction accuracy | 2 / 10 = 20.0% |
+| Blue instruction accuracy | 2 / 10 = 20.0% |
+| Yellow instruction accuracy | 2 / 10 = 20.0% |
+
+## 8. Interpretation
+
+The dominant bottleneck was manipulation robustness: 18/30 episodes (60%)
+failed before a successful placement. Among the 12 successful manipulation
+episodes, six selected the correct color and six placed the wrong color.
+
+The model showed partial language-conditioned color selection, but the result
+was not sufficient to conclude robust language grounding. The dominant
+bottleneck was manipulation failure, followed by language/color-selection
+failure.
+
+## 9. Reproduction
+
+1. Restore the external dataset to the path in section 3.
+2. Run the training command in section 4 to create the output directory.
+3. Evaluate `018000/pretrained_model` with section 6.
+4. Run `analyze_color_eval.py` on the emitted CSV and compare with section 7.
+
+Expected final 18k output: 12/30 task success, 6/30 correct-color success,
+and the confusion matrix in section 7.
+
+## 10. External Archive Paths
+
+| Artifact | Path | Git status |
+| --- | --- | --- |
+| Final dataset | `/home/zxro/arena/lerobot/src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_dataset` | excluded |
+| Position log / generation provenance | `/home/zxro/arena/lerobot/src/lerobot/datasets/openarm_three_color_triplet_tilt50_matte/openarm_three_color_triplet_tilt50_matte_cube_positions` | excluded |
+| Training output | `/home/zxro/arena/lerobot/outputs/train/openarm_three_color_triplet_tilt50_matte_run2_contract` | excluded |
+| Final evaluation CSV/matrices | `/home/zxro/arena/lerobot/outputs/eval/openarm_three_color_triplet_tilt50_matte_run2_contract` | excluded |
+| Final demo video | TODO: verify; no video was found under the final evaluation output directory |
+
+The generation source scripts and evaluation source scripts remain in Git; only
+their large generated artifacts are excluded.
