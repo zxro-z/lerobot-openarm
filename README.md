@@ -1,8 +1,7 @@
 # SmolVLA Simulation Final Archive
 
 This archive records the final simulation experiments: a single-cube
-pick-and-place baseline and a three-color language-conditioned task. Dataset,
-checkpoint, and video binaries remain outside Git.
+pick-and-place baseline and a three-color language-conditioned task. Dataset and checkpoint remain outside Git.
 
 ## 1. Overview
 
