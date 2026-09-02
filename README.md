@@ -226,6 +226,10 @@ Diagonal entries are instruction-consistent successes. Off-diagonal entries
 are wrong-color successes. The failure column represents unsuccessful task
 completion.
 
+#### Demo Video
+
+https://github.com/user-attachments/assets/cdef1ade-e8e7-4b0a-8174-66c6f1c5389d
+
 ### Final three-color evaluation command
 
 ```bash
