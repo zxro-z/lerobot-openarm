@@ -15,6 +15,7 @@ import torch
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.counterfactual import load_counterfactual_triplet_metadata
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.target_grounding import TARGET_SLOT_LABEL_KEY, load_target_grounding_metadata
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.utils import prepare_observation_for_inference
 
@@ -23,6 +24,7 @@ DEFAULT_CHECKPOINT = PROJECT_ROOT / "outputs/train/latest/checkpoints/last/pretr
 DEFAULT_DATASET_ROOT = PROJECT_ROOT / "src/lerobot/datasets/openarm_three_color_fixed_slots_perm_tilt50_r3"
 DEFAULT_DATASET_REPO_ID = "local/openarm_three_color_fixed_slots_perm_tilt50_r3"
 COLORS = ("red", "blue", "yellow")
+PAIR_ORDER = (("red", "blue"), ("red", "yellow"), ("blue", "yellow"))
 TASK_FALLBACK = {
     "red": "Pick up the red cube and place it in the storage box.",
     "blue": "Pick up the blue cube and place it in the storage box.",
@@ -75,6 +77,37 @@ def pairwise_l2(values: dict[str, np.ndarray]) -> tuple[dict[str, float], float]
     return distances, float(np.mean(scalars)) if scalars else 0.0
 
 
+def pairwise_deltas(values: dict[str, np.ndarray]) -> dict[str, list[float]]:
+    deltas: dict[str, list[float]] = {}
+    for left, right in PAIR_ORDER:
+        key = f"{left}_vs_{right}"
+        delta = values[left].reshape(-1) - values[right].reshape(-1)
+        deltas[key] = delta.astype(np.float32).tolist()
+    return deltas
+
+
+def leading_action_vector(value: np.ndarray) -> np.ndarray:
+    flat = np.asarray(value, dtype=np.float32)
+    if flat.ndim <= 1:
+        return flat.reshape(-1)
+    return flat[0].reshape(-1)
+
+
+def pairwise_cosine(gt_values: dict[str, np.ndarray], pred_values: dict[str, np.ndarray]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for left, right in PAIR_ORDER:
+        key = f"{left}_vs_{right}"
+        gt_delta = leading_action_vector(gt_values[left]) - leading_action_vector(gt_values[right])
+        pred_delta = leading_action_vector(pred_values[left]) - leading_action_vector(pred_values[right])
+        gt_norm = float(np.linalg.norm(gt_delta))
+        pred_norm = float(np.linalg.norm(pred_delta))
+        if gt_norm == 0.0 or pred_norm == 0.0:
+            result[key] = 0.0
+        else:
+            result[key] = float(np.dot(gt_delta, pred_delta) / (gt_norm * pred_norm))
+    return result
+
+
 def to_numpy_image(image: torch.Tensor | np.ndarray) -> np.ndarray:
     if isinstance(image, torch.Tensor):
         image = image.detach().cpu().numpy()
@@ -119,6 +152,7 @@ def main() -> None:
         video_backend="pyav",
     )
     metadata = load_counterfactual_triplet_metadata(dataset=dataset, manifest_path=args.triplet_manifest)
+    grounding_metadata = load_target_grounding_metadata(dataset)
     tasks = resolve_tasks(dataset)
 
     policy_cfg = PreTrainedConfig.from_pretrained(str(checkpoint))
@@ -167,6 +201,9 @@ def main() -> None:
         }
         gt_chunks: dict[str, np.ndarray] = {}
         pred_chunks: dict[str, np.ndarray] = {}
+        grounding_predictions: dict[str, int] = {}
+        grounding_targets: dict[str, int] = {}
+        grounding_logits: dict[str, list[float]] = {}
         for color, item in candidates:
             gt_chunks[color] = item["action"].detach().cpu().to(torch.float32).numpy()
             raw_observation = {
@@ -181,6 +218,18 @@ def main() -> None:
                 robot_type=dataset.meta.robot_type,
             )
             probe_batch = preprocessor(probe_batch)
+            if getattr(policy.config, "target_grounding_enabled", False):
+                target_slot = grounding_metadata.episode_labels[int(item["episode_index"])].target_slot_label
+                if getattr(policy.config, "target_conditioning_enabled", False):
+                    probe_batch[TARGET_SLOT_LABEL_KEY] = torch.tensor(
+                        [target_slot],
+                        device=device,
+                        dtype=torch.long,
+                    )
+                slot_logits = policy.predict_target_slot_logits(probe_batch)[0].float().cpu()
+                grounding_logits[color] = slot_logits.tolist()
+                grounding_predictions[color] = int(slot_logits.argmax(-1).item())
+                grounding_targets[color] = target_slot
             with torch.inference_mode(), (
                 torch.autocast(device_type=device.type) if device.type == "cuda" and args.use_amp else torch.no_grad()
             ):
@@ -191,14 +240,29 @@ def main() -> None:
 
         gt_pairwise, gt_sep = pairwise_l2(gt_chunks)
         pred_pairwise, pred_sep = pairwise_l2(pred_chunks)
+        gt_delta_pairwise = pairwise_deltas(gt_chunks)
+        pred_delta_pairwise = pairwise_deltas(pred_chunks)
+        cosine_pairwise = pairwise_cosine(gt_chunks, pred_chunks)
+        example_episode = triplet_to_episode = next(
+            ep for ep, tid in metadata.episode_to_triplet_id.items() if tid == triplet_id
+        )
         grouped_rows.append(
             {
                 "triplet_id": triplet_id,
+                "layout_id": metadata.episode_to_layout_id[example_episode],
+                "permutation_id": metadata.episode_to_permutation_id[example_episode],
+                "repeat_index": metadata.episode_to_repeat_index[example_episode],
                 "gt_pairwise": gt_pairwise,
                 "pred_pairwise": pred_pairwise,
+                "gt_delta_pairwise": gt_delta_pairwise,
+                "pred_delta_pairwise": pred_delta_pairwise,
+                "cosine_pairwise": cosine_pairwise,
                 "gt_separation": gt_sep,
                 "prediction_separation": pred_sep,
                 "ratio": pred_sep / max(gt_sep, 1e-6),
+                "grounding_predictions": grounding_predictions,
+                "grounding_targets": grounding_targets,
+                "grounding_logits": grounding_logits,
             }
         )
         used_groups += 1

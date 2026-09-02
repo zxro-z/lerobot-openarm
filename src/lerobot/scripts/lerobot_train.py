@@ -29,6 +29,7 @@ from tqdm import tqdm
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.counterfactual import CounterfactualMetadataDataset, load_counterfactual_triplet_metadata
+from lerobot.datasets.target_grounding import TargetGroundingDataset, load_target_grounding_metadata
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import (
     TripletAwareBatchSampler,
@@ -280,6 +281,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         rename_map=cfg.rename_map,
     )
 
+    if is_main_process and getattr(cfg.policy, "target_grounding_enabled", False):
+        logging.info("[TARGET GROUNDING PARAMETER AUDIT]\n%s", pformat(policy.target_grounding_parameter_report()))
+
     if is_main_process:
         logging.info(
             "[FINAL POLICY INPUT FEATURES]\n%s",
@@ -410,6 +414,17 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         or getattr(cfg.policy, "counterfactual_triplets_per_batch", 0) > 0
     )
     counterfactual_metadata = None
+    if getattr(cfg.policy, "target_grounding_enabled", False):
+        target_grounding_metadata = load_target_grounding_metadata(
+            dataset,
+            manifest_path=getattr(cfg.policy, "target_grounding_manifest", None),
+        )
+        dataset = TargetGroundingDataset(dataset, target_grounding_metadata)
+        if is_main_process:
+            logging.info("[TARGET GROUNDING]")
+            logging.info("manifest = %s", target_grounding_metadata.manifest_path)
+            logging.info("episode class counts A/B/C = %s", target_grounding_metadata.episode_class_counts)
+            logging.info("frame class counts A/B/C = %s", target_grounding_metadata.frame_class_counts)
     if use_counterfactual_triplets:
         counterfactual_metadata = load_counterfactual_triplet_metadata(
             dataset=dataset,

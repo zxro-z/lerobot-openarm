@@ -92,6 +92,7 @@ from lerobot.datasets.aggregate import aggregate_datasets  # noqa: E402
 base = degree.base
 torch = base.torch
 original_controller_init = degree.mapped._original_controller_init
+original_controller_advance = base.PickPlaceController.advance
 
 LEROBOT_SRC_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = LEROBOT_SRC_ROOT / "assets" / "openarm_use"
@@ -434,6 +435,43 @@ def _baseline_controller_init(self, robot, scene) -> None:
 
 
 base.PickPlaceController.__init__ = _baseline_controller_init
+
+
+def _fixed_slot_controller_advance(self, dt: float) -> None:
+    """Start target-conditioned motion at safe height for fixed-slot episodes only."""
+    if self.state == "open_gripper":
+        self.state_time += dt
+        self.set_gripper(True)
+        if self.state_time >= base.args_cli.open_time_s:
+            target_safe = self.settled_cube_position()
+            target_safe[2] = self.world_point_to_base((0.0, 0.0, base.args_cli.safe_z))[2]
+            target_safe_xyz = [round(float(v), 6) for v in target_safe.detach().cpu().tolist()]
+            cube_world_xyz = [round(float(v), 6) for v in self.cube.data.root_pos_w[0, :3].detach().cpu().tolist()]
+            print(
+                f"[AUTO][FIXED_SLOT] target={self.target_color} "
+                f"cube_world_xyz={cube_world_xyz} raise_to_safe_goal_b={target_safe_xyz}"
+            )
+            self.enter("raise_to_safe", target_safe)
+        return
+
+    if self.state == "raise_to_safe":
+        self.state_time += dt
+        self.set_gripper(True)
+        if self.interpolated_move(base.args_cli.short_move_time_s):
+            pregrasp = self.settled_cube_position()
+            pregrasp[2] += base.CUBE_SIZE / 2.0 + base.args_cli.pregrasp_clearance
+            pregrasp_xyz = [round(float(v), 6) for v in pregrasp.detach().cpu().tolist()]
+            print(
+                f"[AUTO][FIXED_SLOT] target={self.target_color} "
+                f"pregrasp_goal_b={pregrasp_xyz} after target-directed raise_to_safe"
+            )
+            self.enter("pregrasp", pregrasp)
+        return
+
+    return original_controller_advance(self, dt)
+
+
+base.PickPlaceController.advance = _fixed_slot_controller_advance
 
 
 @contextmanager

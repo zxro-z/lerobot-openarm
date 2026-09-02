@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch or validate SmolVLA fine-tuning on the real OpenArm 3-color dataset."""
+"""Launch or validate SmolVLA fine-tuning on a real OpenArm dataset."""
 
 from __future__ import annotations
 
@@ -97,11 +97,21 @@ def validate_training_dataset_root(dataset_root: Path | None) -> None:
         )
 
 
-def inspect_dataset(dataset_repo_id: str, dataset_root: Path | None) -> tuple[dict, dict]:
+def inspect_dataset(
+    dataset_repo_id: str,
+    dataset_root: Path | None,
+    *,
+    load_vlm_weights: bool,
+    freeze_vision_encoder: bool,
+    train_expert_only: bool,
+    train_state_proj: bool,
+    attention_mode: str,
+) -> tuple[dict, dict]:
     import lerobot.policies  # noqa: F401
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
     from lerobot.datasets.utils import dataset_to_policy_features
+    from lerobot.policies.factory import make_policy
 
     meta = LeRobotDatasetMetadata(dataset_repo_id, root=dataset_root)
     dataset_features = meta.info["features"]
@@ -112,9 +122,18 @@ def inspect_dataset(dataset_repo_id: str, dataset_root: Path | None) -> tuple[di
         cli_overrides=[
             "--input_features=null",
             "--output_features=null",
-            "--load_vlm_weights=true",
+            f"--load_vlm_weights={str(load_vlm_weights).lower()}",
+            f"--freeze_vision_encoder={str(freeze_vision_encoder).lower()}",
+            f"--train_expert_only={str(train_expert_only).lower()}",
+            f"--train_state_proj={str(train_state_proj).lower()}",
+            f"--attention_mode={attention_mode}",
         ],
     )
+    pretrained_cfg.pretrained_path = Path("lerobot/smolvla_base")
+    pretrained_cfg.input_features = None
+    pretrained_cfg.output_features = None
+    pretrained_cfg.device = "cpu"
+    policy = make_policy(pretrained_cfg, ds_meta=meta)
 
     final_output_features = {
         key: {"type": str(ft.type), "shape": ft.shape}
@@ -130,6 +149,33 @@ def inspect_dataset(dataset_repo_id: str, dataset_root: Path | None) -> tuple[di
     tasks_path = meta.root / "meta" / "tasks.parquet"
     tasks = pd.read_parquet(tasks_path)
     task_counts = extract_task_counts(meta.root)
+    trainable_groups = []
+    frozen_groups = []
+    group_patterns = [
+        ("language_embedding", ("model.vlm_with_expert.vlm.model.text_model.embed_tokens",)),
+        ("vlm_transformer", ("model.vlm_with_expert.vlm.model.text_model.layers",)),
+        ("vision_connector", ("model.vlm_with_expert.vlm.model.connector",)),
+        ("vision_encoder", ("model.vlm_with_expert.vlm.model.vision_model",)),
+        ("expert", ("model.vlm_with_expert.lm_expert",)),
+        ("state_proj", ("model.state_proj",)),
+        (
+            "action_head",
+            (
+                "model.action_in_proj",
+                "model.action_out_proj",
+                "model.action_time_mlp_in",
+                "model.action_time_mlp_out",
+            ),
+        ),
+    ]
+    for label, prefixes in group_patterns:
+        params = [p for name, p in policy.named_parameters() if any(name.startswith(prefix) for prefix in prefixes)]
+        if not params:
+            continue
+        if any(p.requires_grad for p in params):
+            trainable_groups.append(label)
+        else:
+            frozen_groups.append(label)
 
     report = {
         "dataset": {
@@ -157,6 +203,12 @@ def inspect_dataset(dataset_repo_id: str, dataset_root: Path | None) -> tuple[di
         "final_policy_input_features": final_input_features,
         "final_policy_output_features": final_output_features,
         "load_vlm_weights": getattr(pretrained_cfg, "load_vlm_weights", None),
+        "train_expert_only": getattr(pretrained_cfg, "train_expert_only", None),
+        "freeze_vision_encoder": getattr(pretrained_cfg, "freeze_vision_encoder", None),
+        "train_state_proj": getattr(pretrained_cfg, "train_state_proj", None),
+        "attention_mode": getattr(pretrained_cfg, "attention_mode", None),
+        "trainable_groups": trainable_groups,
+        "frozen_groups": frozen_groups,
         "tasks": {
             "strings": tasks.index.tolist(),
             "episode_counts": dict(task_counts),
@@ -187,14 +239,28 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--video-backend", choices=["torchcodec", "pyav"], default=None)
     parser.add_argument("--use-amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--freeze-vision-encoder", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--train-expert-only", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--train-state-proj", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--load-vlm-weights", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--attention-mode", default="cross_attn")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     return parser.parse_known_args()
 
 
 def main() -> None:
     args, extra = parse_args()
     args.dataset_root = normalize_dataset_root(args.dataset_root)
-    report, summary = inspect_dataset(args.dataset_repo_id, args.dataset_root)
+    report, summary = inspect_dataset(
+        args.dataset_repo_id,
+        args.dataset_root,
+        load_vlm_weights=args.load_vlm_weights,
+        freeze_vision_encoder=args.freeze_vision_encoder,
+        train_expert_only=args.train_expert_only,
+        train_state_proj=args.train_state_proj,
+        attention_mode=args.attention_mode,
+    )
     print("[DATASET]", flush=True)
     print(pformat(report["dataset"]), flush=True)
     print("[DATASET FEATURES]", flush=True)
@@ -207,6 +273,14 @@ def main() -> None:
     print("[FINAL POLICY OUTPUT FEATURES]", flush=True)
     print(pformat(report["final_policy_output_features"]), flush=True)
     print(f"[VLM WEIGHTS LOADED] {report['load_vlm_weights']}", flush=True)
+    print(f"[TRAIN EXPERT ONLY] {report['train_expert_only']}", flush=True)
+    print(f"[FREEZE VISION ENCODER] {report['freeze_vision_encoder']}", flush=True)
+    print(f"[TRAIN STATE PROJ] {report['train_state_proj']}", flush=True)
+    print(f"[ATTENTION MODE] {report['attention_mode']}", flush=True)
+    print("[TRAINABLE GROUPS]", flush=True)
+    print(pformat(report["trainable_groups"]), flush=True)
+    print("[FROZEN GROUPS]", flush=True)
+    print(pformat(report["frozen_groups"]), flush=True)
     print("[TASKS]", flush=True)
     print(pformat(report["tasks"]), flush=True)
     print("[SUMMARY]", flush=True)
@@ -242,7 +316,6 @@ def main() -> None:
         f"--policy.path={args.policy_path}",
         "--policy.input_features=null",
         "--policy.output_features=null",
-        "--policy.load_vlm_weights=true",
         f"--dataset.repo_id={args.dataset_repo_id}",
         f"--dataset.video_backend={video_backend}",
         f"--batch_size={args.batch_size}",
@@ -255,6 +328,11 @@ def main() -> None:
         f"--job_name={args.job_name}",
         f"--policy.device={args.device}",
         f"--policy.use_amp={str(args.use_amp).lower()}",
+        f"--policy.load_vlm_weights={str(args.load_vlm_weights).lower()}",
+        f"--policy.freeze_vision_encoder={str(args.freeze_vision_encoder).lower()}",
+        f"--policy.train_expert_only={str(args.train_expert_only).lower()}",
+        f"--policy.train_state_proj={str(args.train_state_proj).lower()}",
+        f"--policy.attention_mode={args.attention_mode}",
         "--policy.push_to_hub=false",
         f"--wandb.enable={str(args.wandb).lower()}",
         *extra,
@@ -262,7 +340,33 @@ def main() -> None:
     if args.dataset_root is not None:
         command.insert(6, f"--dataset.root={args.dataset_root.resolve()}")
 
+    print("[EFFECTIVE CONTRACT]", flush=True)
+    print(
+        pformat(
+            {
+                "dataset_repo_id": args.dataset_repo_id,
+                "dataset_root": str(args.dataset_root) if args.dataset_root is not None else None,
+                "policy_path": args.policy_path,
+                "output_dir": str(args.output_dir.resolve()),
+                "batch_size": args.batch_size,
+                "steps": args.steps,
+                "num_workers": args.num_workers,
+                "save_freq": args.save_freq,
+                "log_freq": args.log_freq,
+                "device": args.device,
+                "use_amp": args.use_amp,
+                "load_vlm_weights": args.load_vlm_weights,
+                "freeze_vision_encoder": args.freeze_vision_encoder,
+                "train_expert_only": args.train_expert_only,
+                "train_state_proj": args.train_state_proj,
+                "attention_mode": args.attention_mode,
+            }
+        ),
+        flush=True,
+    )
     print("[TRAIN]", " ".join(command), flush=True)
+    if args.dry_run:
+        return
     os.execvp(command[0], command)
 
 

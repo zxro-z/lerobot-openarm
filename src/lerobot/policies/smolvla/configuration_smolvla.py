@@ -115,10 +115,32 @@ class SmolVLAConfig(PreTrainedConfig):
     early_target_end: int = 100
 
     counterfactual_lambda: float = 0.0
-    counterfactual_chunk_start: int = 0
-    counterfactual_chunk_end: int = 16
+    counterfactual_chunk_start: int = 16
+    counterfactual_chunk_end: int = 50
     counterfactual_triplets_per_batch: int = 0
     counterfactual_triplet_manifest: str | Path | None = None
+    counterfactual_gt_weighting: bool = True
+    counterfactual_gt_weight_min: float = 0.25
+    counterfactual_gt_weight_max: float = 4.0
+    counterfactual_gt_weight_eps: float = 1e-6
+    counterfactual_gt_min_distance: float = 1e-3
+
+    # Explicit instruction -> visual target-slot grounding.
+    target_grounding_enabled: bool = False
+    target_grounding_lambda: float = 0.0
+    target_grounding_num_classes: int = 3
+    target_grounding_action_loss_weight: float = 1.0
+    target_grounding_manifest: str | Path | None = None
+    # Preservation preset: keep the manipulation expert/head and vision tower fixed,
+    # while adapting only the connector, a minimal text-side tail, and the new head.
+    target_grounding_preserve_manipulation: bool = True
+    target_grounding_train_connector: bool = True
+    target_grounding_train_vlm_last_n_layers: int = 1
+    # Minimal frozen-policy target conditioning through the existing state prefix token.
+    target_conditioning_enabled: bool = False
+    target_conditioning_mode: str = "predicted"  # predicted | oracle
+    target_conditioning_scale: float = 1.0
+    target_conditioning_freeze_grounding_head: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -158,6 +180,48 @@ class SmolVLAConfig(PreTrainedConfig):
             raise ValueError(
                 f"counterfactual_chunk_end must be <= chunk_size={self.chunk_size}, got {self.counterfactual_chunk_end}"
             )
+        if self.counterfactual_gt_weight_min <= 0.0:
+            raise ValueError(
+                f"counterfactual_gt_weight_min must be > 0.0, got {self.counterfactual_gt_weight_min}"
+            )
+        if self.counterfactual_gt_weight_max < self.counterfactual_gt_weight_min:
+            raise ValueError(
+                "counterfactual_gt_weight_max must be >= counterfactual_gt_weight_min, "
+                f"got {self.counterfactual_gt_weight_max} < {self.counterfactual_gt_weight_min}"
+            )
+        if self.counterfactual_gt_weight_eps <= 0.0:
+            raise ValueError(
+                f"counterfactual_gt_weight_eps must be > 0.0, got {self.counterfactual_gt_weight_eps}"
+            )
+        if self.counterfactual_gt_min_distance < 0.0:
+            raise ValueError(
+                "counterfactual_gt_min_distance must be >= 0.0, "
+                f"got {self.counterfactual_gt_min_distance}"
+            )
+        if self.target_grounding_lambda < 0.0:
+            raise ValueError(f"target_grounding_lambda must be >= 0, got {self.target_grounding_lambda}")
+        if self.target_grounding_num_classes != 3:
+            raise ValueError(
+                "The fixed-slot target grounding task requires exactly 3 classes "
+                f"(A/B/C), got {self.target_grounding_num_classes}"
+            )
+        if self.target_grounding_action_loss_weight < 0.0:
+            raise ValueError(
+                "target_grounding_action_loss_weight must be >= 0, "
+                f"got {self.target_grounding_action_loss_weight}"
+            )
+        if self.target_grounding_train_vlm_last_n_layers < 0:
+            raise ValueError(
+                "target_grounding_train_vlm_last_n_layers must be >= 0, "
+                f"got {self.target_grounding_train_vlm_last_n_layers}"
+            )
+        if self.target_conditioning_mode not in {"predicted", "oracle"}:
+            raise ValueError(
+                "target_conditioning_mode must be 'predicted' or 'oracle', "
+                f"got {self.target_conditioning_mode!r}"
+            )
+        if self.target_conditioning_scale < 0:
+            raise ValueError(f"target_conditioning_scale must be >= 0, got {self.target_conditioning_scale}")
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

@@ -468,7 +468,13 @@ class OpenArmEnv(gym.Env):
         env_root = self.scene.env_prim_paths[0]
         top_source_path = find_color_camera_path(Sdf.Path(f"{env_root}/Realsense"))
         wrist_source_path = find_color_camera_path(wrist_root_path)
-        match_record_camera_to_source(top_source_path, Sdf.Path(f"{env_root}/TopColorCamera"))
+        top_record_path = Sdf.Path(f"{env_root}/TopColorCamera")
+        match_record_camera_to_source(top_source_path, top_record_path)
+        self.env_root_path = env_root
+        self.wrist_mount_root_path = str(wrist_root_path)
+        self.top_source_camera_path = str(top_source_path)
+        self.top_record_camera_path = str(top_record_path)
+        self.wrist_source_camera_path = str(wrist_source_path)
         self.robot: Articulation = self.scene["robot"]
         self.cubes: dict[str, RigidObject] = {
             "red": self.scene["red_cube"],
@@ -527,9 +533,25 @@ class OpenArmEnv(gym.Env):
             },
             "min_steps_before_success": self.min_steps_before_success,
             "top_camera_pose": {"pos": list(REALSENSE_POS), "rot_wxyz": list(REALSENSE_ROT)},
+            "camera_paths": self.describe_camera_paths(),
             "observation_keys": list(OBSERVATION_KEYS),
             "state_dimension": 8,
             "action_dimension": ACTION_DIM,
+        }
+
+    def describe_camera_paths(self) -> dict[str, object]:
+        return {
+            "observation.images.top": {
+                "wrapper_prim_path": str(self.camera_top.cfg.prim_path),
+                "record_camera_prim_path": self.top_record_camera_path,
+                "source_camera_prim_path": self.top_source_camera_path,
+            },
+            "observation.images.wrist": {
+                "wrapper_prim_path": str(self.camera_wrist.cfg.prim_path),
+                "record_camera_prim_path": str(self.camera_wrist.cfg.prim_path),
+                "source_camera_prim_path": self.wrist_source_camera_path,
+                "wrist_mount_root_path": self.wrist_mount_root_path,
+            },
         }
 
     def reset(self, seed=None, options=None):

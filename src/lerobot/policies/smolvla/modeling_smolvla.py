@@ -274,6 +274,50 @@ class SmolVLAPolicy(PreTrainedPolicy):
     def get_optim_params(self) -> dict:
         return self.parameters()
 
+    def target_grounding_parameter_report(self) -> dict[str, dict[str, int | list[str]]]:
+        """Return auditable parameter names/counts for preservation-sensitive blocks."""
+        model = self.model
+        vlm_model = model.vlm_with_expert.get_vlm_model()
+        last_n = self.config.target_grounding_train_vlm_last_n_layers
+        vlm_layers = list(vlm_model.text_model.layers)
+        blocks = {
+            "vision_encoder": [vlm_model.vision_model],
+            "multimodal_connector": [vlm_model.connector],
+            "vlm_frozen_prefix": vlm_layers[:-last_n] if last_n else vlm_layers,
+            "vlm_trainable_tail": vlm_layers[-last_n:] if last_n else [],
+            "language_embeddings": [vlm_model.text_model.embed_tokens],
+            "state_projection": [model.state_proj],
+            "action_expert": [
+                model.vlm_with_expert.lm_expert,
+                model.action_in_proj,
+                model.action_time_mlp_in,
+                model.action_time_mlp_out,
+            ],
+            "action_head": [model.action_out_proj],
+            "target_grounding_head": [model.target_grounding_head],
+            "target_conditioning_projection": [model.target_conditioning_proj],
+        }
+        parameter_names = {id(parameter): name for name, parameter in self.named_parameters()}
+        report = {}
+        for block_name, modules in blocks.items():
+            parameters = []
+            seen = set()
+            for module in modules:
+                if module is None:
+                    continue
+                for parameter in module.parameters():
+                    if id(parameter) not in seen:
+                        seen.add(id(parameter))
+                        parameters.append(parameter)
+            report[block_name] = {
+                "total": sum(parameter.numel() for parameter in parameters),
+                "trainable": sum(parameter.numel() for parameter in parameters if parameter.requires_grad),
+                "trainable_parameter_names": [
+                    parameter_names[id(parameter)] for parameter in parameters if parameter.requires_grad
+                ],
+            }
+        return report
+
     def _get_action_chunk(
         self, batch: dict[str, Tensor], noise: Tensor | None = None, **kwargs: Unpack[ActionSelectKwargs]
     ) -> Tensor:
@@ -292,7 +336,14 @@ class SmolVLAPolicy(PreTrainedPolicy):
         lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.model.sample_actions(
-            images, img_masks, lang_tokens, lang_masks, state, noise=noise, **kwargs
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=noise,
+            target_slot_label=batch.get("target_slot_label"),
+            **kwargs,
         )
 
         # Unpad actions
@@ -303,6 +354,22 @@ class SmolVLAPolicy(PreTrainedPolicy):
             actions = self._pi_aloha_encode_actions(actions)
 
         return actions
+
+    @torch.no_grad()
+    def predict_target_slot_logits(self, batch: dict[str, Tensor]) -> Tensor:
+        """Predict A/B/C target-slot logits without running the action denoiser."""
+        if not self.config.target_grounding_enabled:
+            raise RuntimeError("Target grounding is not enabled for this policy")
+        self.eval()
+        images, img_masks = self.prepare_images(batch)
+        state = self.prepare_state(batch)
+        return self.model.predict_target_slot_logits(
+            images,
+            img_masks,
+            batch[OBS_LANGUAGE_TOKENS],
+            batch[OBS_LANGUAGE_ATTENTION_MASK],
+            state,
+        )
 
     def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         if self.config.adapt_to_pi_aloha:
@@ -381,7 +448,16 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
         forward_out = self.model.forward(
-            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time, return_outputs=True
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            actions,
+            noise,
+            time,
+            return_outputs=True,
+            target_slot_label=batch.get("target_slot_label"),
         )
         losses = forward_out["losses"]
         pred_actions = forward_out["pred_actions"]
@@ -404,17 +480,41 @@ class SmolVLAPolicy(PreTrainedPolicy):
         aux_loss, aux_metrics = self._compute_counterfactual_loss(batch, pred_actions, actions)
         loss_dict.update(aux_metrics)
 
+        grounding_loss = losses.new_zeros(())
+        if self.config.target_grounding_enabled:
+            target_slot_label = batch.get("target_slot_label")
+            if target_slot_label is None:
+                raise ValueError("target_slot_label is required when target_grounding_enabled=true")
+            target_slot_label = target_slot_label.to(device=losses.device, dtype=torch.long).reshape(-1)
+            target_slot_logits = forward_out["target_slot_logits"]
+            grounding_loss = F.cross_entropy(target_slot_logits, target_slot_label)
+            predictions = target_slot_logits.argmax(dim=-1)
+            loss_dict["target_grounding_loss"] = grounding_loss.item()
+            loss_dict["target_grounding_accuracy"] = (predictions == target_slot_label).float().mean().item()
+            loss_dict["target_grounding_slot_c_ratio"] = (predictions == 2).float().mean().item()
+        else:
+            loss_dict["target_grounding_loss"] = 0.0
+            loss_dict["target_grounding_accuracy"] = 0.0
+            loss_dict["target_grounding_slot_c_ratio"] = 0.0
+
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
             per_sample_loss = losses.mean(dim=(1, 2))
             loss_dict["base_loss"] = per_sample_loss.mean().item()
-            loss_dict["loss"] = (per_sample_loss.mean() + aux_loss).item()
-            loss_dict["_aux_loss"] = aux_loss
+            combined_aux_loss = aux_loss + self.config.target_grounding_lambda * grounding_loss
+            loss_dict["loss"] = (
+                self.config.target_grounding_action_loss_weight * per_sample_loss.mean() + combined_aux_loss
+            ).item()
+            loss_dict["_aux_loss"] = combined_aux_loss
             return per_sample_loss, loss_dict
         else:
             # Default: return scalar mean loss
             base_loss = losses.mean()
-            loss = base_loss + aux_loss
+            loss = (
+                self.config.target_grounding_action_loss_weight * base_loss
+                + aux_loss
+                + self.config.target_grounding_lambda * grounding_loss
+            )
             loss_dict["base_loss"] = base_loss.item()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
@@ -438,20 +538,71 @@ class SmolVLAPolicy(PreTrainedPolicy):
         zero = pred_actions.new_zeros(())
         metrics = {
             "counterfactual_loss": 0.0,
+            "counterfactual_weighted_loss": 0.0,
             "counterfactual_triplets_in_batch": 0.0,
+            "counterfactual_valid_pairs": 0.0,
+            "counterfactual_excluded_pairs": 0.0,
             "counterfactual_pred_separation": 0.0,
             "counterfactual_gt_separation": 0.0,
             "counterfactual_sep_ratio": 0.0,
+            "counterfactual_gt_mean_norm": 0.0,
+            "counterfactual_weight_mean": 0.0,
+            "counterfactual_weight_min": 0.0,
+            "counterfactual_weight_max": 0.0,
         }
         if self.config.counterfactual_lambda <= 0.0:
             return zero, metrics
 
+        details = self._get_counterfactual_loss_details(batch, pred_actions, gt_actions)
+        if details is None:
+            return zero, metrics
+
+        metrics["counterfactual_loss"] = details["unweighted_loss"].item()
+        metrics["counterfactual_weighted_loss"] = details["weighted_loss"].item()
+        metrics["counterfactual_triplets_in_batch"] = float(details["triplet_count"])
+        metrics["counterfactual_valid_pairs"] = float(details["valid_pair_count"])
+        metrics["counterfactual_excluded_pairs"] = float(details["excluded_pair_count"])
+        metrics["counterfactual_pred_separation"] = details["pred_separation"].item()
+        metrics["counterfactual_gt_separation"] = details["gt_separation"].item()
+        metrics["counterfactual_sep_ratio"] = (
+            details["pred_separation"] / details["gt_separation"].clamp_min(1e-6)
+        ).item()
+        metrics["counterfactual_gt_mean_norm"] = details["mean_gt_norm"].item()
+        metrics["counterfactual_weight_mean"] = details["weights"].mean().item()
+        metrics["counterfactual_weight_min"] = details["weights"].min().item()
+        metrics["counterfactual_weight_max"] = details["weights"].max().item()
+        return self.config.counterfactual_lambda * details["weighted_loss"], metrics
+
+    def _get_counterfactual_loss_details(
+        self,
+        batch: dict[str, Tensor],
+        pred_actions: Tensor,
+        gt_actions: Tensor,
+        *,
+        chunk_start: int | None = None,
+        chunk_end: int | None = None,
+        gt_weighting: bool | None = None,
+        gt_weight_min: float | None = None,
+        gt_weight_max: float | None = None,
+        gt_weight_eps: float | None = None,
+        gt_min_distance: float | None = None,
+    ) -> dict[str, Tensor | int | slice] | None:
         triplet_ids = batch.get(COUNTERFACTUAL_TRIPLET_KEY)
         color_ids = batch.get(COUNTERFACTUAL_COLOR_KEY)
         if triplet_ids is None or color_ids is None:
-            return zero, metrics
+            return None
 
-        chunk = slice(self.config.counterfactual_chunk_start, self.config.counterfactual_chunk_end)
+        chunk_start = self.config.counterfactual_chunk_start if chunk_start is None else chunk_start
+        chunk_end = self.config.counterfactual_chunk_end if chunk_end is None else chunk_end
+        gt_weighting = self.config.counterfactual_gt_weighting if gt_weighting is None else gt_weighting
+        gt_weight_min = self.config.counterfactual_gt_weight_min if gt_weight_min is None else gt_weight_min
+        gt_weight_max = self.config.counterfactual_gt_weight_max if gt_weight_max is None else gt_weight_max
+        gt_weight_eps = self.config.counterfactual_gt_weight_eps if gt_weight_eps is None else gt_weight_eps
+        gt_min_distance = (
+            self.config.counterfactual_gt_min_distance if gt_min_distance is None else gt_min_distance
+        )
+
+        chunk = slice(chunk_start, chunk_end)
         pred_chunk = pred_actions[:, chunk, :].reshape(pred_actions.shape[0], -1)
         gt_chunk = gt_actions[:, chunk, :].reshape(gt_actions.shape[0], -1)
 
@@ -459,6 +610,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
         pair_losses: list[Tensor] = []
         pred_separations: list[Tensor] = []
         gt_separations: list[Tensor] = []
+        gt_norms: list[Tensor] = []
+        pair_triplet_ids: list[int] = []
+        pair_names: list[str] = []
         triplet_count = 0
         for triplet_id in unique_triplets.tolist():
             if triplet_id < 0:
@@ -478,25 +632,72 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
             ordered = [by_color[0], by_color[1], by_color[2]]
             triplet_count += 1
-            for left, right in ((0, 1), (0, 2), (1, 2)):
+            for pair_name, (left, right) in zip(
+                ("red_blue", "red_yellow", "blue_yellow"),
+                ((0, 1), (0, 2), (1, 2)),
+                strict=True,
+            ):
                 pred_delta = pred_chunk[ordered[left]] - pred_chunk[ordered[right]]
                 gt_delta = (gt_chunk[ordered[left]] - gt_chunk[ordered[right]]).detach()
                 pair_losses.append(F.mse_loss(pred_delta, gt_delta))
                 pred_separations.append(torch.norm(pred_delta, p=2))
-                gt_separations.append(torch.norm(gt_delta, p=2))
+                gt_norm = torch.norm(gt_delta, p=2)
+                gt_separations.append(gt_norm)
+                gt_norms.append(gt_norm)
+                pair_triplet_ids.append(int(triplet_id))
+                pair_names.append(pair_name)
 
         if not pair_losses:
-            return zero, metrics
+            return None
 
-        cf_loss = torch.stack(pair_losses).mean()
-        pred_sep = torch.stack(pred_separations).mean()
-        gt_sep = torch.stack(gt_separations).mean()
-        metrics["counterfactual_loss"] = cf_loss.item()
-        metrics["counterfactual_triplets_in_batch"] = float(triplet_count)
-        metrics["counterfactual_pred_separation"] = pred_sep.item()
-        metrics["counterfactual_gt_separation"] = gt_sep.item()
-        metrics["counterfactual_sep_ratio"] = (pred_sep / gt_sep.clamp_min(1e-6)).item()
-        return self.config.counterfactual_lambda * cf_loss, metrics
+        pair_losses_t = torch.stack(pair_losses)
+        pred_separations_t = torch.stack(pred_separations)
+        gt_separations_t = torch.stack(gt_separations)
+        gt_norms_t = torch.stack(gt_norms)
+
+        valid_mask = gt_norms_t > gt_min_distance
+        excluded_pair_count = int((~valid_mask).sum().item())
+        if not torch.any(valid_mask):
+            return None
+
+        pair_losses_t = pair_losses_t[valid_mask]
+        pred_separations_t = pred_separations_t[valid_mask]
+        gt_separations_t = gt_separations_t[valid_mask]
+        gt_norms_t = gt_norms_t[valid_mask]
+        valid_mask_list = valid_mask.detach().cpu().tolist()
+        filtered_pair_triplet_ids = [pair_triplet_ids[idx] for idx, keep in enumerate(valid_mask_list) if keep]
+        filtered_pair_names = [pair_names[idx] for idx, keep in enumerate(valid_mask_list) if keep]
+
+        mean_gt_norm = gt_norms_t.detach().mean().clamp_min(gt_weight_eps)
+        if gt_weighting:
+            raw_weights = gt_norms_t.detach() / mean_gt_norm
+            weights = raw_weights.clamp(min=gt_weight_min, max=gt_weight_max)
+        else:
+            raw_weights = torch.ones_like(gt_norms_t)
+            weights = torch.ones_like(gt_norms_t)
+
+        weight_sum = weights.sum().clamp_min(gt_weight_eps)
+        unweighted_loss = pair_losses_t.mean()
+        weighted_loss = (weights * pair_losses_t).sum() / weight_sum
+
+        return {
+            "chunk": chunk,
+            "triplet_count": triplet_count,
+            "valid_pair_count": int(pair_losses_t.shape[0]),
+            "excluded_pair_count": excluded_pair_count,
+            "pair_losses": pair_losses_t,
+            "gt_norms": gt_norms_t,
+            "raw_weights": raw_weights,
+            "weights": weights,
+            "weighted_contributions": (weights * pair_losses_t) / weight_sum,
+            "unweighted_loss": unweighted_loss,
+            "weighted_loss": weighted_loss,
+            "pred_separation": pred_separations_t.mean(),
+            "gt_separation": gt_separations_t.mean(),
+            "mean_gt_norm": mean_gt_norm,
+            "pair_triplet_ids": filtered_pair_triplet_ids,
+            "pair_names": filtered_pair_names,
+        }
 
     def prepare_images(self, batch):
         """Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
@@ -672,6 +873,20 @@ class VLAFlowMatching(nn.Module):
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.vlm_with_expert.expert_hidden_size)
         self.action_out_proj = nn.Linear(self.vlm_with_expert.expert_hidden_size, self.config.max_action_dim)
 
+        hidden_size = self.vlm_with_expert.config.text_config.hidden_size
+        self.target_grounding_head = None
+        if self.config.target_grounding_enabled:
+            self.target_grounding_head = nn.Sequential(
+                nn.LayerNorm(hidden_size),
+                nn.Linear(hidden_size, self.config.target_grounding_num_classes),
+            )
+        self.target_conditioning_proj = None
+        if self.config.target_conditioning_enabled:
+            self.target_conditioning_proj = nn.Linear(
+                self.config.target_grounding_num_classes, hidden_size, bias=False
+            )
+            nn.init.zeros_(self.target_conditioning_proj.weight)
+
         self.action_time_mlp_in = nn.Linear(
             self.vlm_with_expert.expert_hidden_size * 2, self.vlm_with_expert.expert_hidden_size
         )
@@ -719,6 +934,40 @@ class VLAFlowMatching(nn.Module):
     def set_requires_grad(self):
         for params in self.state_proj.parameters():
             params.requires_grad = self.config.train_state_proj
+        if self.config.target_conditioning_enabled and self.config.target_grounding_preserve_manipulation:
+            for param in self.parameters():
+                param.requires_grad = False
+            if self.target_conditioning_proj is None:
+                raise RuntimeError("target_conditioning_enabled but projection is not initialized")
+            for param in self.target_conditioning_proj.parameters():
+                param.requires_grad = True
+            if not self.config.target_conditioning_freeze_grounding_head and self.target_grounding_head is not None:
+                for param in self.target_grounding_head.parameters():
+                    param.requires_grad = True
+            return
+        if not self.config.target_grounding_enabled or not self.config.target_grounding_preserve_manipulation:
+            return
+
+        # Start from a fully frozen policy and open only the deliberately small
+        # representation-side set plus the newly initialized classifier.
+        for param in self.parameters():
+            param.requires_grad = False
+        if self.target_grounding_head is not None:
+            for param in self.target_grounding_head.parameters():
+                param.requires_grad = True
+        if self.config.target_grounding_train_connector:
+            for param in self.vlm_with_expert.get_vlm_model().connector.parameters():
+                param.requires_grad = True
+        train_last_n = self.config.target_grounding_train_vlm_last_n_layers
+        if train_last_n:
+            layers = self.vlm_with_expert.get_vlm_model().text_model.layers
+            if train_last_n > len(layers):
+                raise ValueError(
+                    f"Cannot train last {train_last_n} VLM layers; model only has {len(layers)} layers"
+                )
+            for layer in layers[-train_last_n:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -730,14 +979,79 @@ class VLAFlowMatching(nn.Module):
         )
         return noise
 
+    @staticmethod
+    def _state_token_indices_from_prefix_masks(
+        prefix_pad_masks: Tensor, prefix_att_masks: Tensor
+    ) -> Tensor:
+        # embed_prefix marks the appended state segment with att_mask=1, while
+        # image/text tokens and any fixed-length padding use att_mask=0.
+        state_mask = prefix_pad_masks.bool() & prefix_att_masks.bool()
+        if not bool(state_mask.any(dim=1).all()):
+            raise ValueError("No valid state token found in one or more prefix rows")
+        physical_indices = torch.arange(state_mask.shape[1], device=state_mask.device)
+        return physical_indices.unsqueeze(0).masked_fill(~state_mask, -1).max(dim=1).values
+
+    def _target_slot_logits_from_prefix(
+        self, prefix_out: Tensor, prefix_pad_masks: Tensor, prefix_att_masks: Tensor
+    ) -> Tensor:
+        if self.target_grounding_head is None:
+            raise RuntimeError("Target grounding head is not initialized")
+        state_indices = self._state_token_indices_from_prefix_masks(prefix_pad_masks, prefix_att_masks)
+        batch_indices = torch.arange(prefix_out.shape[0], device=prefix_out.device)
+        fused_state_token = prefix_out[batch_indices, state_indices].to(dtype=torch.float32)
+        return self.target_grounding_head(fused_state_token)
+
+    def predict_target_slot_logits(self, images, img_masks, lang_tokens, lang_masks, state) -> Tensor:
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        attention_mask = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        (prefix_out, _), _ = self.vlm_with_expert.forward(
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=False,
+            fill_kv_cache=True,
+        )
+        return self._target_slot_logits_from_prefix(prefix_out, prefix_pad_masks, prefix_att_masks)
+
     def sample_time(self, bsize, device):
         beta_dist = torch.distributions.Beta(concentration1=1.5, concentration0=1.0)
         time_beta = beta_dist.sample((bsize,)).to(device=device, dtype=torch.float32)
         time = time_beta * 0.999 + 0.001
         return time
 
+    def _make_target_conditioning(
+        self, images, img_masks, lang_tokens, lang_masks, state, target_slot_label
+    ) -> Tensor | None:
+        if not self.config.target_conditioning_enabled:
+            return None
+        if self.target_conditioning_proj is None:
+            raise RuntimeError("Target conditioning projection is not initialized")
+        if self.config.target_conditioning_mode == "oracle":
+            if target_slot_label is None:
+                raise ValueError("target_slot_label is required for oracle target conditioning")
+            target_values = F.one_hot(
+                target_slot_label.long().reshape(-1), num_classes=self.config.target_grounding_num_classes
+            ).float()
+        else:
+            # The successful 750-step grounding head and its source representation
+            # stay frozen; only the downstream conditioning projection is learned.
+            with torch.no_grad():
+                logits = self.predict_target_slot_logits(images, img_masks, lang_tokens, lang_masks, state)
+                target_values = logits.softmax(dim=-1)
+        return self.config.target_conditioning_scale * self.target_conditioning_proj(target_values)
+
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks, state: torch.Tensor = None
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state: torch.Tensor = None,
+        target_conditioning: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for SmolVLM transformer processing.
@@ -804,6 +1118,8 @@ class VLAFlowMatching(nn.Module):
         att_masks += [0] * num_lang_embs
 
         state_emb = self.state_proj(state)
+        if target_conditioning is not None:
+            state_emb = state_emb + target_conditioning.to(dtype=state_emb.dtype)
         state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
         embs.append(state_emb)
         bsize = state_emb.shape[0]
@@ -885,6 +1201,7 @@ class VLAFlowMatching(nn.Module):
         noise=None,
         time=None,
         return_outputs: bool = False,
+        target_slot_label: Tensor | None = None,
     ) -> Tensor | dict[str, Tensor]:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
@@ -896,8 +1213,16 @@ class VLAFlowMatching(nn.Module):
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
+        target_conditioning = self._make_target_conditioning(
+            images, img_masks, lang_tokens, lang_masks, state, target_slot_label
+        )
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state=state,
+            target_conditioning=target_conditioning,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
 
@@ -906,7 +1231,7 @@ class VLAFlowMatching(nn.Module):
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
-        (_, suffix_out), _ = self.vlm_with_expert.forward(
+        (prefix_out, suffix_out), _ = self.vlm_with_expert.forward(
             attention_mask=att_2d_masks,
             position_ids=position_ids,
             past_key_values=None,
@@ -922,7 +1247,12 @@ class VLAFlowMatching(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         if return_outputs:
             pred_actions = noise - v_t
-            return {"losses": losses, "pred_actions": pred_actions}
+            outputs = {"losses": losses, "pred_actions": pred_actions}
+            if self.target_grounding_head is not None:
+                outputs["target_slot_logits"] = self._target_slot_logits_from_prefix(
+                    prefix_out, prefix_pad_masks, prefix_att_masks
+                )
+            return outputs
         return losses
 
     def sample_actions(
@@ -933,6 +1263,7 @@ class VLAFlowMatching(nn.Module):
         lang_masks,
         state,
         noise=None,
+        target_slot_label: Tensor | None = None,
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
@@ -943,8 +1274,16 @@ class VLAFlowMatching(nn.Module):
             actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
 
+        target_conditioning = self._make_target_conditioning(
+            images, img_masks, lang_tokens, lang_masks, state, target_slot_label
+        )
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state=state,
+            target_conditioning=target_conditioning,
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
