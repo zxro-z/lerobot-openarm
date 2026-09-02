@@ -71,7 +71,7 @@ HF_DATASETS_CACHE=/home/zxro/.cache/hf_lerobot/datasets \
 
 - Result CSV: `/home/zxro/arena/lerobot/outputs/eval/ab_local_verified/results.csv`
 - Video directory: `/home/zxro/arena/lerobot/outputs/eval/ab_local_verified/videos`
-- Representative success video: `episode_000_success_1.mp4`
+- Representative success video: [`episode_000_success_1.mp4`](https://github.com/user-attachments/assets/8657caf1-2273-4117-87f1-e1e0ee9582ec)
 
 ### Final single-cube evaluation command
 
